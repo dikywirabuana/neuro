@@ -15,6 +15,7 @@ import type {
   Position,
   Trade,
 } from "./types";
+import { timeExitHoursOf } from "./types";
 
 export type PendingExit = {
   pair: string;
@@ -114,6 +115,8 @@ export class PaperPortfolio {
       setup?: Position["setup"];
       holdMin?: number;
       setupLow?: number;
+      tpMid?: number;
+      tpUpper?: number;
     },
   ): Trade | null {
     if (lastPrice <= 0) return null;
@@ -160,8 +163,10 @@ export class PaperPortfolio {
       stopLoss: extras?.stopPct
         ? fill * (1 - extras.stopPct)
         : stopPrice(fill, settings, pair),
-      takeProfit: extras?.tpPct
-        ? fill * (1 + settings.feeRate * 2 + extras.tpPct)
+      takeProfit: extras?.tpMid
+        ? extras.tpMid
+        : extras?.tpPct
+        ? fill * (1 + extras.tpPct)
         : takeProfitPrice(fill, settings, pair),
       costIdr: spend,
       peakPrice: fill,
@@ -169,6 +174,9 @@ export class PaperPortfolio {
       setupHoldMin: extras?.holdMin ?? 12,
       setupLow: extras?.setupLow,
       slHits: 0,
+      tpMid: extras?.tpMid,
+      tpUpper: extras?.tpUpper,
+      partialTaken: false,
     };
 
     const trade: Trade = {
@@ -201,6 +209,8 @@ export class PaperPortfolio {
       holdMin?: number;
       setupLow?: number;
       skipCash?: boolean;
+      tpMid?: number;
+      tpUpper?: number;
     },
   ): Trade | null {
     if (!(fillPrice > 0) || !(qty > 0)) return null;
@@ -216,8 +226,10 @@ export class PaperPortfolio {
       stopLoss: extras?.stopPct
         ? fillPrice * (1 - extras.stopPct)
         : stopPrice(fillPrice, settings, pair),
-      takeProfit: extras?.tpPct
-        ? fillPrice * (1 + settings.feeRate * 2 + extras.tpPct)
+      takeProfit: extras?.tpMid
+        ? extras.tpMid
+        : extras?.tpPct
+        ? fillPrice * (1 + extras.tpPct)
         : takeProfitPrice(fillPrice, settings, pair),
       costIdr: spend,
       peakPrice: fillPrice,
@@ -225,6 +237,9 @@ export class PaperPortfolio {
       setupHoldMin: extras?.holdMin ?? 12,
       setupLow: extras?.setupLow,
       slHits: 0,
+      tpMid: extras?.tpMid,
+      tpUpper: extras?.tpUpper,
+      partialTaken: false,
     };
     const trade: Trade = {
       id: uid(),
@@ -272,7 +287,7 @@ export class PaperPortfolio {
     pos.entryPrice = (pos.entryPrice * (newQty - qty) + fillPrice * qty) / newQty;
     pos.setup = "GRID";
     if (extras?.tpPct) {
-      pos.takeProfit = pos.entryPrice * (1 + settings.feeRate * 2 + extras.tpPct);
+      pos.takeProfit = pos.entryPrice * (1 + extras.tpPct);
     }
     if (extras?.stopPct) pos.stopLoss = pos.entryPrice * (1 - extras.stopPct);
     pos.peakPrice = Math.max(pos.peakPrice ?? fillPrice, fillPrice);
@@ -445,6 +460,7 @@ export class PaperPortfolio {
     prices: Record<string, number>,
     _settings: BotSettings,
     bids?: Record<string, number>,
+    gridAdds?: Record<string, number>,
   ): PendingExit[] {
     const out: PendingExit[] = [];
     const equity = this.equity(prices);
@@ -455,6 +471,39 @@ export class PaperPortfolio {
     const circuitOk = initial >= 10_000;
     const circuitLoss = circuitOk && globalPct <= -lossCut;
     const circuitWin = circuitOk && globalPct >= winLock;
+
+    const feeRate = _settings.feeRate || 0.0025;
+    let netUnreal = 0;
+    for (const pos of Object.values(this.positions)) {
+      const last = prices[pos.pair];
+      if (!(last > 0)) continue;
+      const bid = bids?.[pos.pair] && bids[pos.pair] > 0 ? bids[pos.pair] : last;
+      netUnreal += bid * pos.qty * (1 - feeRate) - pos.costIdr;
+    }
+    const lockEq = equity > 0 && netUnreal >= equity * 0.02;
+
+    if (lockEq) {
+      for (const pair of Object.keys(this.positions)) {
+        const pos = this.positions[pair];
+        if (!pos) continue;
+        const heldSec = (Date.now() - pos.entryTime) / 1000;
+        if (heldSec < 45) continue;
+        const last = prices[pair];
+        if (!(last > 0)) continue;
+        const bid = bids?.[pair] && bids[pair] > 0 ? bids[pair] : last;
+        out.push({ pair, reason: "LOCK_EQ_2", sellPx: bid, qty: pos.qty });
+      }
+      if (out.length) return out;
+    }
+
+    const exitHours = timeExitHoursOf(_settings);
+    const timedPair =
+      exitHours > 0
+        ? Object.values(this.positions)
+            .filter((p) => p.setup !== "GRID")
+            .slice()
+            .sort((a, b) => a.entryTime - b.entryTime)[0]?.pair
+        : undefined;
 
     for (const pair of Object.keys(this.positions)) {
       const pos = this.positions[pair];
@@ -475,7 +524,6 @@ export class PaperPortfolio {
       const tp = pos.takeProfit;
       const heldMin = (Date.now() - pos.entryTime) / 60_000;
       const heldSec = heldMin * 60;
-      const feeRate = _settings.feeRate || 0.0025;
       const proceeds = mark * pos.qty * (1 - feeRate);
       const netPct =
         pos.costIdr > 0 ? ((proceeds - pos.costIdr) / pos.costIdr) * 100 : 0;
@@ -483,40 +531,71 @@ export class PaperPortfolio {
         1.8,
         ((pos.entryPrice - hardSl) / pos.entryPrice) * 100,
       );
+      const peakGrossPct =
+        pos.entryPrice > 0
+          ? ((pos.peakPrice ?? pos.entryPrice) / pos.entryPrice - 1) * 100
+          : 0;
+      const retraceFromPeakPct =
+        (pos.peakPrice ?? 0) > 0
+          ? (((pos.peakPrice ?? mark) - mark) / (pos.peakPrice ?? mark)) * 100
+          : 0;
       let reason: string | null = null;
 
-      const through = mark <= sl && last <= sl;
-      const crash = netPct <= -Math.max(4, hardLossPct + 0.5);
-      const deep = crash || last <= sl * 0.994;
+      const through = mark <= sl;
+      const crash = netPct <= -Math.max(3.5, hardLossPct);
+      const deep = crash || last <= sl * 0.994 || mark <= sl * 0.997;
 
-      // Lot baru: fee + spread selalu minus dulu. Jangan CIRCUIT/SL 8 detik setelah BUY.
-      if (heldSec < 90 && !crash) {
-        pos.slHits = 0;
+      if (
+        exitHours > 0 &&
+        pair === timedPair &&
+        heldMin >= exitHours * 60 &&
+        pos.setup !== "GRID"
+      ) {
+        if (netPct >= 0.7) {
+          out.push({
+            pair,
+            reason: `TIME_${exitHours}H`,
+            sellPx: bid,
+            qty: pos.qty,
+          });
+        }
         continue;
       }
 
       if (pos.setup === "GRID") {
-        if (circuitWin && netPct >= 0.6 && heldMin >= 2) {
-          reason = "LOCK_GLOBAL_5";
-        } else if (deep) {
-          reason = "STOP_LOSS";
-        } else if (through && heldMin >= 2) {
-          pos.slHits = (pos.slHits ?? 0) + 1;
-          if ((pos.slHits ?? 0) >= 2) reason = "STOP_LOSS";
-        } else {
+        const tpLevel =
+          tp > 0 ? tp : pos.entryPrice * (1 + Math.max(0.01, _settings.takeProfit || 0.014));
+        const tpHit = bid >= tpLevel && netPct >= 0.2;
+        const adds = Math.max(1, gridAdds?.[pair] || 1);
+        if (tpHit && heldSec >= 5) {
+          const lotQty = pos.qty / adds;
+          out.push({
+            pair,
+            reason: "GRID_TP",
+            sellPx: bid,
+            qty: lotQty,
+          });
+          continue;
+        }
+        if (heldSec < 25 && !crash) {
           pos.slHits = 0;
+          continue;
         }
-        if (!reason && circuitLoss && through && heldMin >= 2) {
-          reason = "CIRCUIT_SL";
+        if (deep || through) {
+          out.push({
+            pair,
+            reason: "STOP_LOSS",
+            sellPx: mark,
+            qty: pos.qty,
+          });
         }
-        if (!reason) continue;
-        out.push({
-          pair,
-          reason,
-          sellPx: reason.startsWith("STOP") || reason === "CIRCUIT_SL" ? mark : bid,
-          qty: pos.qty,
-        });
         continue;
+      }
+
+      // Lot baru: SL jangan kena shadow. TP boleh cepat.
+      if (heldSec < 45 && !crash) {
+        pos.slHits = 0;
+        if (!(netPct >= 0.7 && bid >= tp && heldSec >= 5)) continue;
       }
 
       if (circuitWin && netPct >= 0.6 && heldMin >= 2) {
@@ -537,6 +616,14 @@ export class PaperPortfolio {
 
       if (!reason && netPct >= 0.7 && bid >= tp) {
         reason = "TAKE_PROFIT";
+      } else if (
+        !reason &&
+        heldMin >= 3 &&
+        peakGrossPct >= 1.35 &&
+        retraceFromPeakPct >= 0.55 &&
+        netPct >= 0.5
+      ) {
+        reason = "TRAIL_GREEN";
       } else if (!reason && heldMin >= 12 && netPct >= 0.7) {
         reason = "LOCK_GREEN";
       }

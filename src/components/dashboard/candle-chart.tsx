@@ -248,6 +248,11 @@ export function WatchChart({
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#1e2733] px-3 py-2.5">
         <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
           <div className="text-base font-semibold tracking-wide">{ticker}/IDR</div>
+          {position ? (
+            <span className="rounded bg-[#26a69a]/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#26a69a]">
+              Pair aktif
+            </span>
+          ) : null}
           <span
             className={`text-lg font-semibold tabular ${
               up ? "text-[#26a69a]" : "text-[#ef5350]"

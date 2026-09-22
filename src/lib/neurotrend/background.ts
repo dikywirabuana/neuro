@@ -1,4 +1,4 @@
-const SW_URL = "/sw-neurotrend.js";
+const SW_URL = "/sw-neurotrend.js?v=5";
 
 let wakeLock: WakeLockSentinel | null = null;
 let swReady: ServiceWorkerRegistration | null = null;

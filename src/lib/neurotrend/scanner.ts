@@ -113,6 +113,7 @@ export function scoreMarket(
       rsi: tech.details.rsi,
       emaFast: tech.details.emaFast,
       change24h,
+      pair,
     });
 
     const fc = forecastPair(series, last, {

@@ -10,6 +10,10 @@ export function positionSizeIdr(
   pair?: string,
 ): number {
   if (equity < MIN_ORDER) return 0;
+  if (settings.trade90Pct) {
+    const size = Math.floor(equity * 0.9);
+    return size >= MIN_ORDER ? size : 0;
+  }
   const sl = pair ? policyFor(pair).stopLoss : settings.stopLoss;
   if (sl <= 0) return 0;
   const cap = Math.min(
@@ -19,6 +23,9 @@ export function positionSizeIdr(
   );
   let size = (equity * settings.riskPerTrade) / sl;
   size = Math.min(size, cap);
+  if (size < 12_500 && equity >= 12_500) {
+    size = Math.min(12_500, cap, Math.floor(equity * 0.92));
+  }
   if (size < MIN_ORDER && equity >= MIN_ORDER) {
     size = Math.min(MIN_ORDER, cap, Math.floor(equity * 0.92));
   }

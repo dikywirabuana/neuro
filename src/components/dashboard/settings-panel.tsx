@@ -11,7 +11,7 @@ import {
   type RiskStyle,
 } from "@/lib/neurotrend/capital-preset";
 import type { BotSettings, TradingMode } from "@/lib/neurotrend/types";
-import { PLAYBOOKS, playbookOf } from "@/lib/neurotrend/playbook";
+import { PLAYBOOKS } from "@/lib/neurotrend/playbook";
 import { formatIdr, formatIdrReal } from "@/lib/utils";
 
 type CapitalMode = "optimal" | "manual";
@@ -30,7 +30,7 @@ export function SettingsPanel({
   settings,
   realIdrBalance,
   apiStatus,
-  grokStatus,
+  grokStatus: _grokStatus,
   scaleWithEquity,
   riskMode,
   riskStyle,
@@ -39,10 +39,13 @@ export function SettingsPanel({
   onApplyRisk,
   onSaveApi,
   onTestApi,
-  onTestGrok,
+  onTestGrok: _onTestGrok,
   onScaleWithEquity,
   onRiskMode,
   onRiskStyle,
+  autoPlaybook,
+  playbookWhy,
+  onAutoPlaybook,
 }: {
   settings: BotSettings;
   realIdrBalance: number | null;
@@ -63,12 +66,13 @@ export function SettingsPanel({
   onScaleWithEquity: (v: boolean) => void;
   onRiskMode: (mode: CapitalMode) => void;
   onRiskStyle: (style: RiskStyle) => void;
+  autoPlaybook?: boolean;
+  playbookWhy?: string;
+  onAutoPlaybook?: (v: boolean) => void;
 }) {
   const [draft, setDraft] = useState<BotSettings>(settings);
   const [testing, setTesting] = useState(false);
-  const [testingGrok, setTestingGrok] = useState(false);
   const [showSecret, setShowSecret] = useState(false);
-  const [showXai, setShowXai] = useState(false);
   const capitalMode = riskMode === "manual" ? "manual" : "optimal";
 
   useEffect(() => {
@@ -146,116 +150,16 @@ export function SettingsPanel({
         </p>
       </div>
 
-      <div className="panel space-y-4 border border-[var(--color-accent)]/25 p-4 sm:p-5">
+      <div className="panel space-y-3 border border-[var(--color-border)] p-4 sm:p-5">
         <div>
-          <div className="text-sm font-medium">Grok AI (xAI) — pilot 100%</div>
+          <div className="text-sm font-medium">Cloud AI — mati</div>
           <p className="mt-1 text-xs text-[var(--color-muted)] leading-relaxed">
-            Connect sukses = Grok menjalankan scan, trade, posisi, taktik, SL/TP,
-            risk. Key:{" "}
-            <a
-              className="underline underline-offset-2"
-              href="https://console.x.ai"
-              target="_blank"
-              rel="noreferrer"
-            >
-              console.x.ai
-            </a>
+            Grok / Gemini tidak dipanggil. Bot pakai mesin heuristic (gratis).
+            API key cloud tidak terpakai, tidak ada biaya token.
           </p>
         </div>
-        <label className="flex items-center gap-2 text-sm">
-          <input
-            type="checkbox"
-            className="h-4 w-4 accent-[var(--color-accent)]"
-            checked={draft.useGrokAi}
-            onChange={(e) =>
-              setDraft((d) => ({ ...d, useGrokAi: e.target.checked }))
-            }
-          />
-          Grok pilot ON
-        </label>
-        <div className="space-y-1.5">
-          <div className="flex justify-between">
-            <Label htmlFor="xaiApiKey">Grok API Key</Label>
-            <button
-              type="button"
-              className="text-xs text-[var(--color-muted)]"
-              onClick={() => setShowXai((v) => !v)}
-            >
-              {showXai ? "Hide" : "Show"}
-            </button>
-          </div>
-          <Input
-            id="xaiApiKey"
-            type={showXai ? "text" : "password"}
-            autoComplete="off"
-            spellCheck={false}
-            placeholder="xai-..."
-            value={draft.xaiApiKey}
-            onChange={(e) =>
-              setDraft((d) => ({ ...d, xaiApiKey: e.target.value.trim() }))
-            }
-          />
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <Button
-            type="button"
-            onClick={() => {
-              onSaveApi({
-                xaiApiKey: draft.xaiApiKey,
-                useGrokAi: draft.useGrokAi,
-              });
-              toast.success("Grok key disimpan");
-            }}
-          >
-            Simpan Grok key
-          </Button>
-          <Button
-            type="button"
-            variant="secondary"
-            disabled={testingGrok}
-            onClick={async () => {
-              onSaveApi({ xaiApiKey: draft.xaiApiKey, useGrokAi: true });
-              setTestingGrok(true);
-              const ok = await onTestGrok();
-              setTestingGrok(false);
-              if (ok) toast.success("Grok CONNECTED — pilot 100%");
-              else toast.error("Grok gagal — cek Log");
-            }}
-          >
-            {testingGrok ? "Connecting…" : "Connect Grok"}
-          </Button>
-          <span className="text-xs text-[var(--color-muted)]">
-            Status:{" "}
-            {grokStatus === "ok"
-              ? "GROK PILOT"
-              : grokStatus === "fail"
-                ? "Gagal"
-                : "Belum diuji"}
-          </span>
-        </div>
-        <div className="space-y-1.5 border-t border-[var(--color-border)] pt-3">
-          <Label htmlFor="geminiApiKey">Gemini (cadangan, opsional)</Label>
-          <Input
-            id="geminiApiKey"
-            type={showXai ? "text" : "password"}
-            autoComplete="off"
-            placeholder="AIza..."
-            value={draft.geminiApiKey}
-            onChange={(e) =>
-              setDraft((d) => ({ ...d, geminiApiKey: e.target.value.trim() }))
-            }
-          />
-          <Button
-            type="button"
-            variant="secondary"
-            size="sm"
-            onClick={() => {
-              onSaveApi({ geminiApiKey: draft.geminiApiKey });
-              toast.success("Gemini key disimpan");
-            }}
-          >
-            Simpan Gemini
-          </Button>
+        <div className="rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-elevated)]/40 px-3 py-2 text-xs text-[var(--color-subtle)]">
+          Mode: HEURISTIC · BOUNCE / BREAKOUT · tanpa rotasi
         </div>
       </div>
 
@@ -297,6 +201,25 @@ export function SettingsPanel({
           ) : null}
         </div>
 
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            className="h-4 w-4 accent-[var(--color-accent)]"
+            checked={Boolean(draft.trade90Pct)}
+            onChange={(e) => {
+              const on = e.target.checked;
+              setDraft((d) => ({ ...d, trade90Pct: on }));
+              onSaveApi({ trade90Pct: on });
+              toast.message(
+                on
+                  ? "90% equity ON — 1 order ≈ 90% modal"
+                  : "90% equity OFF — size kembali ke cap biasa",
+              );
+            }}
+          />
+          Trade 90% equity per order
+        </label>
+
         <div className="grid gap-2 sm:grid-cols-3">
           {(
             [
@@ -337,48 +260,30 @@ export function SettingsPanel({
 
         <div className="space-y-2">
           <div className="text-xs font-medium text-[var(--color-subtle)]">
-            Pilih trik trade
+            Mesin trade
           </div>
-          <div className="grid gap-2 sm:grid-cols-2">
-            {PLAYBOOKS.map((p) => {
-              const on = draft.playbook === p.id;
-              return (
-                <button
-                  key={p.id}
-                  type="button"
-                  onClick={() => {
-                    const next = { ...draft, playbook: p.id };
-                    setDraft(next);
-                    onSaveApi({ playbook: p.id });
-                    toast.success(`${p.name} aktif`);
-                  }}
-                  className={`rounded-[var(--radius-md)] border p-3 text-left transition ${
-                    on
-                      ? "border-[var(--color-buy)] bg-[var(--color-buy)]/10"
-                      : "border-[var(--color-border)] hover:border-[var(--color-accent)]/50"
-                  }`}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="text-sm font-semibold">{p.name}</div>
-                    <div className="text-[10px] uppercase tracking-wide text-[var(--color-subtle)]">
-                      {p.maxPositions} pos
-                    </div>
-                  </div>
-                  <div className="mt-0.5 text-[11px] text-[var(--color-muted)]">
-                    {p.tagline}
-                  </div>
-                  <ul className="mt-2 space-y-0.5 text-[11px] text-[var(--color-subtle)]">
-                    {p.tricks.slice(0, 4).map((t) => (
-                      <li key={t}>· {t}</li>
-                    ))}
-                  </ul>
-                </button>
-              );
-            })}
-          </div>
-          <p className="text-[11px] text-[var(--color-muted)]">
-            {playbookOf(draft.playbook).note}
-          </p>
+          {PLAYBOOKS.map((p) => (
+            <div
+              key={p.id}
+              className="rounded-[var(--radius-md)] border border-[var(--color-buy)] bg-[var(--color-buy)]/10 p-3"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-sm font-semibold">{p.name}</div>
+                <div className="text-[10px] uppercase tracking-wide text-[var(--color-buy)]">
+                  aktif
+                </div>
+              </div>
+              <div className="mt-0.5 text-[11px] text-[var(--color-muted)]">
+                {p.tagline}
+              </div>
+              <ul className="mt-2 space-y-0.5 text-[11px] text-[var(--color-subtle)]">
+                {p.tricks.map((t) => (
+                  <li key={t}>· {t}</li>
+                ))}
+              </ul>
+              <p className="mt-2 text-[11px] text-[var(--color-muted)]">{p.note}</p>
+            </div>
+          ))}
         </div>
 
         <div className="rounded-[var(--radius-md)] border border-[var(--color-accent)]/30 bg-[var(--color-accent-dim)]/20 p-3 space-y-1">
@@ -398,6 +303,27 @@ export function SettingsPanel({
             Circuit: rugi global {(draft.globalStopPct * 100).toFixed(0)}% → jual
             yang kena SL · untung global {(draft.globalTakePct * 100).toFixed(0)}% →
             jual semua + stop entry
+          </div>
+          <div className="pt-1 space-y-1.5">
+            <div className="text-[11px] text-[var(--color-subtle)]">
+              Timeout pair tertua
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {([0, 1, 2, 3] as const).map((h) => (
+                <button
+                  key={h}
+                  type="button"
+                  className={`rounded-full border px-2.5 py-1 text-[11px] font-medium ${
+                    (draft.timeExitHours || 0) === h
+                      ? "border-[var(--color-accent)] bg-[var(--color-accent-dim)] text-[var(--color-accent)]"
+                      : "border-[var(--color-border)] text-[var(--color-muted)]"
+                  }`}
+                  onClick={() => setDraft((d) => ({ ...d, timeExitHours: h }))}
+                >
+                  {h === 0 ? "Off" : `${h} jam`}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
 

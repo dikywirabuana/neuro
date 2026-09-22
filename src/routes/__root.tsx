@@ -42,6 +42,11 @@ export const Route = createRootRoute({
       { rel: "manifest", href: "/__grok/manifest.webmanifest" },
       { rel: "apple-touch-icon", href: "/__grok/icon-180.png" },
     ],
+    scripts: [
+      {
+        children: `(function(){window.addEventListener('unhandledrejection',function(e){var m=String((e.reason&&e.reason.message)||e.reason||'');if(/dynamically imported module|Importing a module script failed/i.test(m)){try{if(sessionStorage.getItem('nt-chunk-reload')==='1')return;sessionStorage.setItem('nt-chunk-reload','1')}catch(x){}location.reload()}})})();`,
+      },
+    ],
   }),
   component: RootComponent,
 });

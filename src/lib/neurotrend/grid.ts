@@ -81,7 +81,10 @@ export function gridPlan(opts: {
   const lot = Math.max(10_000, Math.floor(lotIdr));
 
   if (pos && pos.qty > 0) {
-    const tp = pos.entryPrice * (1 + stepPct);
+    const tp =
+      pos.takeProfit > 0
+        ? pos.takeProfit
+        : pos.entryPrice * (1 + stepPct);
     if (mark >= tp) {
       const n = Math.max(1, state.adds);
       const sellQty = pos.qty / n;
@@ -101,9 +104,9 @@ export function gridPlan(opts: {
     return { state, action: "HOLD", reason: `grid: max ${maxAdds} lot` };
   }
 
-  const dump = (change24h ?? 0) < -18;
+  const dump = (change24h ?? 0) < -30;
   if (!pos) {
-    if (regime === "TREND_DOWN" || dump) {
+    if (dump) {
       return { state, action: "HOLD", reason: "grid: tunggu dump reda" };
     }
     return {

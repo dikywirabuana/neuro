@@ -77,6 +77,9 @@ export type Position = {
   setupHoldMin?: number;
   setupLow?: number;
   slHits?: number;
+  tpMid?: number;
+  tpUpper?: number;
+  partialTaken?: boolean;
 };
 
 export type Trade = {
@@ -125,6 +128,10 @@ export type BotSettings = {
   globalStopPct: number;
   /** Jual semua jika return global ≥ ini */
   globalTakePct: number;
+  /** 0 = off, 1/2/3 = jam timeout pair tertua */
+  timeExitHours: 0 | 1 | 2 | 3;
+  /** Satu order = 90% equity (abaikan cap 35%) */
+  trade90Pct: boolean;
 };
 
 export type BotSummary = {
@@ -147,12 +154,12 @@ export const HARD_NOTIONAL_CAP = 10_000_000;
 export const DEFAULT_SETTINGS: BotSettings = {
   initialIdr: 0,
   riskPerTrade: 0.02,
-  stopLoss: 0.016,
-  takeProfit: 0.014,
+  stopLoss: 0.018,
+  takeProfit: 0.022,
   maxPositions: 2,
-  minScoreToBuy: 64,
-  minVolumeIdr: 300_000_000,
-  scanIntervalSec: 30,
+  minScoreToBuy: 56,
+  minVolumeIdr: 80_000_000,
+  scanIntervalSec: 15,
   feeRate: 0.0025,
   maxNotional: 10_000,
   paperOnly: true,
@@ -162,13 +169,25 @@ export const DEFAULT_SETTINGS: BotSettings = {
   apiSecret: "",
   xaiApiKey: "",
   geminiApiKey: "",
-  useGrokAi: true,
+  useGrokAi: false,
   scanFocus: "all",
   dailyLossLimitPct: 0.05,
-  playbook: "hybrid",
+  playbook: "smart",
   globalStopPct: 0.05,
   globalTakePct: 0.05,
+  timeExitHours: 0,
+  trade90Pct: false,
 };
+
+export function timeExitHoursOf(s: {
+  timeExitHours?: number;
+  timeExit60?: boolean;
+}): 0 | 1 | 2 | 3 {
+  const h = Math.round(Number(s.timeExitHours));
+  if (h === 1 || h === 2 || h === 3) return h;
+  if (s.timeExit60 === true) return 1;
+  return 0;
+}
 
 export function isLiveEnabled(s: BotSettings): boolean {
   return (

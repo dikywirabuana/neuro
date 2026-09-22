@@ -52,12 +52,7 @@ export function heuristicDecide(
   const slots = Math.max(0, maxPositions - openPositions);
 
   if (!allowEntry) {
-    return candidates.slice(0, 8).map((c) => ({
-      pair: c.pair,
-      action: "SKIP" as const,
-      confidence: 0.85,
-      reason: `Regime ${regime ?? "NO TRADE"}: diam`,
-    }));
+    // Tetap ranking; diam total bikin bot sepi semalaman.
   }
 
   const ranked = candidates
@@ -71,7 +66,7 @@ export function heuristicDecide(
   const maxBuy = Math.min(slots, 1);
   let bought = 0;
   return ranked.slice(0, 8).map(({ c, ev, edge }) => {
-    const need = c.setup === "BOUNCE" ? 72 : c.setup === "BREAKOUT" ? 70 : 68;
+    const need = 56;
     const slotBuy = ev.ok && bought < maxBuy && edge >= need;
     const ok = slotBuy;
     if (ok) bought += 1;

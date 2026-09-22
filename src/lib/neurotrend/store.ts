@@ -15,7 +15,7 @@ import {
   type RiskStyle,
 } from "./capital-preset";
 import { evaluateEntry } from "./entry";
-import { isPlaybookId, playbookFitsSetup, playbookOf, playbookAllowsPair } from "./playbook";
+import { playbookFitsSetup, playbookOf, playbookAllowsPair } from "./playbook";
 import { gridPlan, gridStepPct, pickGridPair, type GridState } from "./grid";
 import {
   getInfo,
@@ -34,14 +34,15 @@ import {
   tradeOrderId,
   waitUntilSettled,
   getOrderStatus,
+  minBuyIdr,
   type WalletAsset,
   type OpenOrder,
 } from "./indodax-private";
 import { isTradeablePair } from "./new-coins";
-import { PaperPortfolio } from "./portfolio";
+import { PaperPortfolio, type PendingExit } from "./portfolio";
 import { detectRegime, type RegimeReport } from "./regime";
 import { notifyTakeProfit, unlockAudio } from "./notify";
-import { pickRotateVictim, shouldRotate, canOpenReason, positionSizeIdr } from "./risk";
+import { canOpenReason, positionSizeIdr } from "./risk";
 import { pushPriceHistory, rankOpportunities, scoreMarket } from "./scanner";
 import {
   DEFAULT_SETTINGS,
@@ -115,6 +116,9 @@ type BotState = {
   watchPair: string;
   watchTf: string;
   gridState: GridState | null;
+  autoPlaybook: boolean;
+  playbookWhy: string;
+  circuitBase: number;
 
   pushLog: (text: string, kind?: LogKind) => void;
   start: () => void;
@@ -154,6 +158,7 @@ type BotState = {
   cancelPendingManual: (pair: string) => Promise<boolean>;
   setWatchPair: (pair: string) => void;
   setWatchTf: (tf: string) => void;
+  setAutoPlaybook: (v: boolean) => void;
 };
 
 let scanTimer: ReturnType<typeof setInterval> | null = null;
@@ -162,7 +167,7 @@ let scanning = false;
 let priceRefreshing = false;
 const exitingPairs = new Set<string>();
 const pairCooldownUntil = new Map<string, number>();
-const PAIR_COOLDOWN_MS = 15 * 60 * 1000;
+const PAIR_COOLDOWN_MS = 12 * 60 * 1000;
 
 function markPairCooldown(pair: string) {
   pairCooldownUntil.set(pair, Date.now() + PAIR_COOLDOWN_MS);
@@ -195,22 +200,26 @@ function normalizeSettings(raw: Partial<BotSettings> | undefined): BotSettings {
   s.apiSecret = s.apiSecret ?? "";
   s.xaiApiKey = s.xaiApiKey ?? "";
   s.geminiApiKey = s.geminiApiKey ?? "";
-  s.useGrokAi = s.useGrokAi !== false;
+  s.useGrokAi = false;
   s.iUnderstandLive = Boolean(s.iUnderstandLive);
   s.paperOnly = s.tradingMode !== "live";
   s.scanFocus = "all";
-  s.playbook = isPlaybookId(s.playbook) ? s.playbook : "hybrid";
-  s.maxPositions = Math.min(5, Math.max(1, Math.round(s.maxPositions) || 2));
+  s.playbook = "smart";
+  s.maxPositions = Math.min(3, Math.max(1, Math.round(s.maxPositions) || 2));
   s.scanIntervalSec = Math.max(15, Math.round(s.scanIntervalSec) || 30);
   s.dailyLossLimitPct = s.dailyLossLimitPct > 0 ? s.dailyLossLimitPct : 0.05;
   s.globalStopPct = Math.min(0.15, Math.max(0.02, s.globalStopPct || 0.05));
   s.globalTakePct = Math.min(0.2, Math.max(0.02, s.globalTakePct || 0.05));
+  const hours = Math.round(Number(s.timeExitHours));
+  if (hours === 1 || hours === 2 || hours === 3) s.timeExitHours = hours;
+  else if ((s as { timeExit60?: boolean }).timeExit60 === true) s.timeExitHours = 1;
+  else s.timeExitHours = 0;
+  s.trade90Pct = Boolean(s.trade90Pct);
   const hard = hardCapForCapital(s.initialIdr);
-  s.maxNotional = Math.min(
-    hard,
-    Math.max(10_000, Math.round(s.maxNotional) || 10_000),
-  );
-  s.minScoreToBuy = Math.min(Math.max(s.minScoreToBuy || 58, 50), 80);
+  let notion = Math.round(s.maxNotional) || 0;
+  if (notion <= 10_000 && hard > 12_500) notion = Math.min(hard, 15_000);
+  s.maxNotional = Math.min(hard, Math.max(10_000, notion || 10_000));
+  s.minScoreToBuy = Math.min(Math.max(s.minScoreToBuy || 56, 50), 70);
   if (s.takeProfit > 0.03) s.takeProfit = 0.012;
   if (Math.round(s.initialIdr) === 198_335) s.initialIdr = 0;
   s.initialIdr = Math.max(0, Math.round(s.initialIdr) || 0);
@@ -386,7 +395,7 @@ function reconcileLivePositions(
   }
 }
 
-async function askAi(opts: {
+async function askAi(_opts: {
   regime: string;
   allowEntry: boolean;
   candidates: Opportunity[];
@@ -408,63 +417,7 @@ async function askAi(opts: {
   summary: string;
   decisions: AiDecision[];
 }> {
-  try {
-    const res = await fetch("/api/ai/decide", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        regime: opts.regime,
-        allowEntry: opts.allowEntry,
-        candidates: opts.candidates.map((c) => ({
-          pair: c.pair,
-          score: c.score,
-          signal: c.signal,
-          price: c.price,
-          rangePos: c.rangePos,
-          volumeIdr: c.volumeIdr,
-          spreadPct: c.spreadPct,
-          dayRangePct: c.dayRangePct,
-          forecast: c.forecast,
-          setup: c.setup,
-          setupReason: c.setupReason,
-          setupStopPct: c.setupStopPct,
-          setupTpPct: c.setupTpPct,
-        })),
-        weights: opts.weights,
-        openPositions: opts.openPositions,
-        maxPositions: opts.maxPositions,
-        minScore: opts.minScore,
-        feeRate: opts.feeRate,
-        xaiApiKey: opts.xaiApiKey,
-        geminiApiKey: opts.geminiApiKey,
-        held: opts.held ?? [],
-        cash: opts.cash,
-        equity: opts.equity,
-        dailyLoss: opts.dailyLoss,
-        maxNotional: opts.maxNotional,
-        live: opts.live,
-      }),
-      signal: AbortSignal.timeout(25_000),
-    });
-    const json = (await res.json()) as {
-      source?: string;
-      decisions?: AiDecision[];
-      summary?: string;
-    };
-    const src =
-      json.source === "gemini" || json.source === "grok" ? json.source : "heuristic";
-    return {
-      source: src,
-      summary: json.summary || "",
-      decisions: json.decisions ?? [],
-    };
-  } catch (e) {
-    return {
-      source: "heuristic",
-      summary: e instanceof Error ? e.message : "AI gagal",
-      decisions: [],
-    };
-  }
+  return { source: "heuristic", summary: "Cloud AI OFF", decisions: [] };
 }
 
 async function liveSellOk(
@@ -516,23 +469,131 @@ async function liveSellOk(
     }
     const oid = tradeOrderId(raw);
     if (oid) {
-      const settled = await waitUntilSettled(
+      await waitUntilSettled(
         settings.apiKey,
         settings.apiSecret,
         pair,
         oid,
         8000,
       );
-      if (settled.filled) return { ok: true, soldQty: sellQty };
     }
     const after = await getCoinBalances(settings.apiKey, settings.apiSecret, coin);
+    if (!after.ok) return { ok: false, error: after.error || "balance after sell" };
     if (dustOf(after)) return { ok: true, soldQty: sellQty };
     const left = (after.avail || 0) + (after.hold || 0);
-    const before = (bal.avail || 0) + (bal.hold || 0);
-    if (left < before * 0.15) return { ok: true, soldQty: Math.max(0, before - left) };
-    return { ok: false, error: lastErr };
+    const beforeTot = (bal.avail || 0) + (bal.hold || 0);
+    const soldAmt = Math.max(0, beforeTot - left);
+    if (soldAmt >= sellQty * 0.85) {
+      return { ok: true, soldQty: soldAmt };
+    }
+    return { ok: false, error: lastErr === "sell" ? "sell belum fill / sisa masih ada" : lastErr };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+function gridAddsMap(gs: GridState | null): Record<string, number> {
+  if (!gs?.pair) return {};
+  return { [gs.pair.toLowerCase()]: Math.max(1, gs.adds || 1) };
+}
+
+function followChart(
+  set: (p: Partial<BotState>) => void,
+  get: () => BotState,
+  pair: string,
+) {
+  const p = String(pair || "").toLowerCase();
+  if (!p.endsWith("_idr")) return;
+  if (get().watchPair === p) return;
+  set({ watchPair: p });
+}
+
+function fillQtyFromDelta(
+  before: { avail: number; ok: boolean },
+  after: { avail: number; ok: boolean },
+  pair: string,
+): number {
+  if (!before.ok || !after.ok) return -1;
+  return quantizeBaseQty(Math.max(0, after.avail - before.avail), pair);
+}
+
+async function executePendingExits(
+  get: () => BotState,
+  set: (p: Partial<BotState>) => void,
+  pf: PaperPortfolio,
+  exits: PendingExit[],
+  settings: BotSettings,
+  live: boolean,
+): Promise<void> {
+  for (const ex of exits) {
+    if (exitingPairs.has(ex.pair) || sellingNow.has(ex.pair)) continue;
+    exitingPairs.add(ex.pair);
+    sellingNow.add(ex.pair);
+    try {
+      if (!pf.positions[ex.pair]) continue;
+      let soldQty = ex.qty;
+      if (live) {
+        const sold = await liveSellOk(settings, ex.pair, ex.sellPx, ex.qty);
+        if (!sold.ok) {
+          get().pushLog(
+            `TP/SL ${ex.reason} ${ex.pair} — LIVE SELL gagal: ${sold.error}`,
+            "error",
+          );
+          continue;
+        }
+        if (sold.alreadyFlat) {
+          pf.forgetPosition(ex.pair, ex.sellPx, "SYNC_SOLD");
+          markDropped(ex.pair);
+          get().pushLog(
+            `SYNC ${ex.pair.replace("_idr", "").toUpperCase()} sudah flat di Indodax`,
+            "exit",
+          );
+          continue;
+        }
+        if (sold.soldQty && sold.soldQty > 0) soldQty = sold.soldQty;
+      }
+      const pos = pf.positions[ex.pair];
+      if (!pos) continue;
+      const t =
+        soldQty > 0 && soldQty < pos.qty * 0.95
+          ? pf.closePartial(ex.pair, soldQty, ex.sellPx, ex.reason, settings)
+          : pf.closePosition(ex.pair, ex.sellPx, ex.reason, settings);
+      if (!t) continue;
+      if (!pf.has(ex.pair)) {
+        markDropped(t.pair);
+        markPairCooldown(t.pair);
+        const gs = get().gridState;
+        if (gs?.pair === t.pair) set({ gridState: { ...gs, adds: 0 } });
+      } else if (ex.reason === "GRID_TP") {
+        const gs = get().gridState;
+        if (gs?.pair === t.pair) {
+          set({
+            gridState: {
+              ...gs,
+              adds: Math.max(0, gs.adds - 1),
+              lastBuyPx: t.price,
+            },
+          });
+        }
+      }
+      get().pushLog(
+        `EXIT ${t.pair} @ ${Math.round(t.price).toLocaleString("id-ID")} · ${t.reason} · PnL ${Math.round(t.pnl).toLocaleString("id-ID")}`,
+        "exit",
+      );
+      if (
+        t.reason === "TAKE_PROFIT" ||
+        t.reason === "LOCK_GREEN" ||
+        t.reason === "LOCK_GLOBAL_5" ||
+        t.reason === "GRID_TP" ||
+        t.reason === "TRAIL_GREEN" ||
+        t.reason === "LOCK_EQ_2"
+      ) {
+        notifyTakeProfit(t.pair, t.pnl);
+      }
+    } finally {
+      exitingPairs.delete(ex.pair);
+      sellingNow.delete(ex.pair);
+    }
   }
 }
 
@@ -563,7 +624,7 @@ async function runGridCycle(
     pos,
     cash: pf.cash,
     stepPct: step,
-    maxAdds: Math.min(3, playbookOf("grid").maxPositions, settings.maxPositions || 3),
+    maxAdds: Math.min(3, settings.maxPositions || 3),
     lotIdr: lot,
     regime: regimeName,
     change24h: opps.find((o) => o.pair === pair)?.change24h,
@@ -576,6 +637,7 @@ async function runGridCycle(
     const qty = plan.sellQty && plan.sellQty > 0 ? plan.sellQty : pos.qty;
     const px = bids[pair] || prices[pair];
     exitingPairs.add(pair);
+    sellingNow.add(pair);
     try {
       if (live) {
         const sold = await liveSellOk(settings, pair, px * 0.997, qty);
@@ -613,6 +675,7 @@ async function runGridCycle(
       }
     } finally {
       exitingPairs.delete(pair);
+      sellingNow.delete(pair);
     }
     return plan.reason;
   }
@@ -622,9 +685,14 @@ async function runGridCycle(
     return plan.reason;
   }
 
-  const size = Math.max(10_000, Math.min(plan.sizeIdr, pf.cash * 0.92));
   const px = prices[pair];
   const ask = opps.find((o) => o.pair === pair)?.sell || px;
+  const need = minBuyIdr(pair, ask);
+  const size = Math.max(need, Math.min(plan.sizeIdr, pf.cash * 0.95));
+  if (size < need || pf.cash < need) {
+    get().pushLog(`GRID BUY skip ${pair}: min lot Rp ${need.toLocaleString("id-ID")}`, "ai");
+    return plan.reason;
+  }
   if (live) {
     try {
       const before = await getCoinBalances(
@@ -653,7 +721,35 @@ async function runGridCycle(
           8000,
         );
         if (!settled.filled) {
-          get().pushLog(`GRID BUY ${pair} menunggu fill`, "live");
+          await cancelOpenOrders(settings.apiKey, settings.apiSecret, pair);
+          const afterCancel = await getCoinBalances(
+            settings.apiKey,
+            settings.apiSecret,
+            coinOfPair(pair),
+          );
+          const partial = fillQtyFromDelta(before, afterCancel, pair);
+          if (partial > 0) {
+            const infoP = await getInfo(settings.apiKey, settings.apiSecret);
+            pf.syncCash(infoP.balanceIdr);
+            const tP = pf.addToLong(pair, ask, partial, settings, plan.reason, {
+              tpPct,
+              stopPct: slPct,
+              skipCash: true,
+            });
+            if (tP) {
+              const next: GridState = {
+                pair,
+                anchor: plan.state.anchor || tP.price,
+                lastBuyPx: tP.price,
+                adds: (plan.state.adds || 0) + 1,
+              };
+              set({ gridState: next });
+              followChart(set, get, pair);
+              get().pushLog(`GRID BUY PARTIAL ${pair} qty=${partial}`, "entry");
+            }
+            return plan.reason;
+          }
+          get().pushLog(`GRID BUY ${pair} belum fill — dibatalkan`, "live");
           return plan.reason;
         }
       }
@@ -662,10 +758,11 @@ async function runGridCycle(
         settings.apiSecret,
         coinOfPair(pair),
       );
-      const filledQty = quantizeBaseQty(
-        Math.max(0, after.avail - (before.ok ? before.avail : 0)),
-        pair,
-      );
+      const filledQty = fillQtyFromDelta(before, after, pair);
+      if (filledQty < 0) {
+        get().pushLog(`GRID BUY ${pair} balance gagal — tidak catat`, "error");
+        return plan.reason;
+      }
       if (filledQty <= 0) {
         get().pushLog(`GRID BUY ${pair} qty 0`, "error");
         return plan.reason;
@@ -685,6 +782,7 @@ async function runGridCycle(
           adds: (plan.state.adds || 0) + 1,
         };
         set({ gridState: next });
+        followChart(set, get, pair);
         get().pushLog(
           `GRID BUY ${pair.replace("_idr", "").toUpperCase()} lot ${next.adds} @ ${Math.round(trade.price).toLocaleString("id-ID")}`,
           "entry",
@@ -712,6 +810,7 @@ async function runGridCycle(
       adds: (plan.state.adds || 0) + 1,
     };
     set({ gridState: next });
+    followChart(set, get, pair);
     get().pushLog(
       `GRID BUY ${pair.replace("_idr", "").toUpperCase()} lot ${next.adds} @ ${Math.round(trade.price).toLocaleString("id-ID")}`,
       "entry",
@@ -751,7 +850,15 @@ async function settleManualLimits(
         settings.apiSecret,
         coinOfPair(p.pair),
       );
-      const qty = quantizeBaseQty(Math.max(0, bal.avail), p.pair);
+      if (!bal.ok) {
+        keep.push(p);
+        continue;
+      }
+      const cap = p.limitPx > 0 ? (p.sizeIdr / p.limitPx) * 1.08 : 0;
+      const qty = quantizeBaseQty(
+        Math.min(Math.max(0, bal.avail), cap > 0 ? cap : bal.avail),
+        p.pair,
+      );
       if (qty <= 0) {
         keep.push(p);
         continue;
@@ -764,7 +871,13 @@ async function settleManualLimits(
         qty,
         settings,
         `MANUAL_LIMIT:${p.limitPx}`,
-        { stopPct: p.slPct, tpPct: p.tpPct, setup: "NONE", holdMin: 12 },
+        {
+          stopPct: p.slPct,
+          tpPct: p.tpPct,
+          setup: "NONE",
+          holdMin: 12,
+          skipCash: true,
+        },
       );
       if (trade) {
         changed = true;
@@ -828,6 +941,9 @@ export const useBotStore = create<BotState>()(
       watchPair: "btc_idr",
       watchTf: "15",
       gridState: null,
+      autoPlaybook: true,
+      playbookWhy: "",
+      circuitBase: 0,
 
       pushLog: (text, kind = "info") => {
         set((s) => ({
@@ -856,6 +972,10 @@ export const useBotStore = create<BotState>()(
       setWatchTf: (tf) => {
         set({ watchTf: tf });
       },
+      setAutoPlaybook: (v) => {
+        set({ autoPlaybook: v });
+        get().pushLog(v ? "Strategi AUTO — bot pilih mode tiap scan" : "Strategi dikunci manual");
+      },
       setRiskMode: (mode) => {
         set({ riskMode: mode });
         get().pushLog(`Risk mode: ${mode}`);
@@ -866,11 +986,12 @@ export const useBotStore = create<BotState>()(
       },
       saveApiSettings: (partial) => {
         const next = normalizeSettings({ ...get().settings, ...partial });
-        set({ settings: next });
         if (partial.playbook) {
           const pb = playbookOf(next.playbook);
-          get().pushLog(`Playbook ${pb.name} · ${pb.tagline}`, "ai");
+          set({ settings: next, autoPlaybook: false, playbookWhy: `Manual · ${pb.name}` });
+          get().pushLog(`Playbook dikunci: ${pb.name} · ${pb.tagline}`, "ai");
         } else {
+          set({ settings: next });
           get().pushLog("API/settings partial saved");
         }
       },
@@ -959,43 +1080,9 @@ export const useBotStore = create<BotState>()(
       },
 
       testGrokConnection: async () => {
-        const { settings } = get();
-        try {
-          const res = await fetch("/api/ai/decide", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              ping: true,
-              prefer: "grok",
-              geminiApiKey: settings.geminiApiKey,
-              xaiApiKey: settings.xaiApiKey,
-            }),
-            signal: AbortSignal.timeout(15_000),
-          });
-          const json = (await res.json()) as {
-            ok?: boolean;
-            source?: string;
-            summary?: string;
-          };
-          if (json.source === "gemini" || json.source === "grok" || json.ok) {
-            set({ grokStatus: "ok" });
-            get().pushLog(
-              json.source === "grok" ? "Grok CONNECTED · pilot 100%" : "Cloud AI CONNECTED",
-              "ai",
-            );
-            return true;
-          }
-          set({ grokStatus: "fail" });
-          get().pushLog(`Grok fail: ${json.summary || "not grok"}`, "error");
-          return false;
-        } catch (e) {
-          set({ grokStatus: "fail" });
-          get().pushLog(
-            `Grok error: ${e instanceof Error ? e.message : String(e)}`,
-            "error",
-          );
-          return false;
-        }
+        set({ grokStatus: "fail" });
+        get().pushLog("Cloud AI dimatikan — tidak panggil Grok/Gemini (hemat API)", "ai");
+        return false;
       },
 
       ensureLiveQuotes: () => {
@@ -1007,7 +1094,7 @@ export const useBotStore = create<BotState>()(
           try {
             const { tickers, source } = await fetchTickers();
             if (source !== "live") {
-              set({ source: "error", lastQuoteAt: Date.now() });
+              set({ source: "error" });
               return;
             }
             const prices: Record<string, number> = { ...get().prices };
@@ -1028,50 +1115,20 @@ export const useBotStore = create<BotState>()(
             await settleManualLimits(get, set);
             const pf = portfolioFromState({ ...get(), settings });
             const assetsEarly = await syncLiveAssets(get, set, prices, pf);
-            const pending = pf.pendingExits(prices, settings, bids);
-            for (const ex of pending) {
-              if (exitingPairs.has(ex.pair)) continue;
-              exitingPairs.add(ex.pair);
-              try {
-                if (isLiveEnabled(settings)) {
-                  const sold = await liveSellOk(settings, ex.pair, ex.sellPx, ex.qty);
-                  if (!sold.ok) {
-                    get().pushLog(
-                      `TP/SL ${ex.reason} ${ex.pair} — LIVE SELL gagal: ${sold.error}`,
-                      "error",
-                    );
-                    continue;
-                  }
-                  if (sold.alreadyFlat) {
-                    pf.forgetPosition(ex.pair, ex.sellPx, "SYNC_SOLD");
-                    markDropped(ex.pair);
-                    get().pushLog(
-                      `SYNC ${ex.pair.replace("_idr", "").toUpperCase()} sudah flat di Indodax`,
-                      "exit",
-                    );
-                    continue;
-                  }
-                }
-                const t = pf.closePosition(ex.pair, ex.sellPx, ex.reason, settings);
-                if (t) {
-                  markDropped(t.pair);
-                  markPairCooldown(t.pair);
-                  get().pushLog(
-                    `EXIT ${t.pair} @ ${Math.round(t.price).toLocaleString("id-ID")} · ${t.reason} · PnL ${Math.round(t.pnl).toLocaleString("id-ID")}`,
-                    "exit",
-                  );
-                  if (
-                    t.reason === "TAKE_PROFIT" ||
-                    t.reason === "LOCK_GREEN" ||
-                    t.reason === "LOCK_GLOBAL_5"
-                  ) {
-                    notifyTakeProfit(t.pair, t.pnl);
-                  }
-                }
-              } finally {
-                exitingPairs.delete(ex.pair);
-              }
-            }
+            const pending = pf.pendingExits(
+              prices,
+              settings,
+              bids,
+              gridAddsMap(get().gridState),
+            );
+            await executePendingExits(
+              get,
+              set,
+              pf,
+              pending,
+              settings,
+              isLiveEnabled(settings),
+            );
             pf.markToMarket(prices);
             const assets = assetsEarly ?? (await syncLiveAssets(get, set, prices, pf));
             let summary = pf.summary(prices);
@@ -1332,7 +1389,7 @@ export const useBotStore = create<BotState>()(
         }
 
         const pf = portfolioFromState({ ...get(), settings });
-        const useGrid = Boolean(grid) || settings.playbook === "grid";
+        const useGrid = Boolean(grid);
         if (pf.has(key) && !useGrid) {
           get().pushLog(`Manual BUY: ${key} sudah open — ubah TP/SL saja`, "error");
           return false;
@@ -1343,13 +1400,22 @@ export const useBotStore = create<BotState>()(
         }
 
         const want = Math.round(Number(sizeIdr) || 0);
+        await ensurePairMeta();
+        const need = minBuyIdr(key, limitPx);
         const size = Math.max(
-          10_000,
+          need,
           Math.min(
-            want > 0 ? want : settings.maxNotional || 10_000,
-            Math.floor(pf.cash * 0.92),
+            want > 0 ? Math.max(want, need) : Math.max(settings.maxNotional || 0, need),
+            Math.floor(pf.cash * 0.95),
           ),
         );
+        if (size < need) {
+          get().pushLog(
+            `Manual BUY: lot min Rp ${need.toLocaleString("id-ID")} — naikkan size / cash`,
+            "error",
+          );
+          return false;
+        }
         const live = isLiveEnabled(settings);
 
         if (live) {
@@ -1419,10 +1485,11 @@ export const useBotStore = create<BotState>()(
               settings.apiSecret,
               coinOfPair(key),
             );
-            const filledQty = quantizeBaseQty(
-              Math.max(0, after.avail - (before.ok ? before.avail : 0)),
-              key,
-            );
+            const filledQty = fillQtyFromDelta(before, after, key);
+            if (filledQty < 0) {
+              get().pushLog(`MANUAL BUY ${key} balance gagal — tidak catat`, "error");
+              return false;
+            }
             if (filledQty <= 0) {
               get().pushLog(`MANUAL BUY ${key} qty 0`, "error");
               return false;
@@ -1462,6 +1529,7 @@ export const useBotStore = create<BotState>()(
               equityHistory: [...pf.equityHistory],
               summary: pf.summary(get().prices),
               prices: { ...get().prices, [key]: last },
+              watchPair: key,
               gridState: useGrid
                 ? {
                     pair: key,
@@ -1518,6 +1586,7 @@ export const useBotStore = create<BotState>()(
           equityHistory: [...pf.equityHistory],
           summary: pf.summary({ ...get().prices, [key]: last }),
           prices: { ...get().prices, [key]: last },
+          watchPair: key,
           gridState: useGrid
             ? {
                 pair: key,
@@ -1754,7 +1823,6 @@ export const useBotStore = create<BotState>()(
           }
           void ensurePairMeta();
           let settings = get().settings;
-          const pb = playbookOf(settings.playbook);
           const live = isLiveEnabled(settings);
           const { tickers, source } = await fetchTickers();
           if (source !== "live") {
@@ -1762,10 +1830,6 @@ export const useBotStore = create<BotState>()(
             if (live && get().running) {
               get().pushLog("NO TRADE — ticker Indodax gagal / bukan live", "error");
             }
-            return;
-          }
-          if (live && Date.now() - (get().lastQuoteAt ?? 0) > 20_000 && get().lastQuoteAt) {
-            get().pushLog("NO TRADE — ticker stale", "error");
             return;
           }
 
@@ -1791,45 +1855,13 @@ export const useBotStore = create<BotState>()(
           const pf = portfolioFromState({ ...get(), settings });
           await syncLiveAssets(get, set, prices, pf);
 
-          const closedPending = pf.pendingExits(prices, settings, bids);
-          for (const ex of closedPending) {
-            if (exitingPairs.has(ex.pair)) continue;
-            exitingPairs.add(ex.pair);
-            try {
-              if (live) {
-                const sold = await liveSellOk(settings, ex.pair, ex.sellPx, ex.qty);
-                if (!sold.ok) {
-                  get().pushLog(
-                    `TP/SL ${ex.reason} ${ex.pair} — LIVE SELL gagal, posisi tetap: ${sold.error}`,
-                    "error",
-                  );
-                  continue;
-                }
-                if (sold.alreadyFlat) {
-                  pf.forgetPosition(ex.pair, ex.sellPx, "SYNC_SOLD");
-                  markDropped(ex.pair);
-                  get().pushLog(
-                    `SYNC ${ex.pair.replace("_idr", "").toUpperCase()} sudah flat di Indodax`,
-                    "exit",
-                  );
-                  continue;
-                }
-              }
-              const t = pf.closePosition(ex.pair, ex.sellPx, ex.reason, settings);
-              if (t) {
-                markDropped(t.pair);
-                get().pushLog(
-                  `EXIT ${t.pair} @ ${Math.round(t.price).toLocaleString("id-ID")} · ${t.reason} · PnL ${Math.round(t.pnl).toLocaleString("id-ID")}`,
-                  "exit",
-                );
-                if (t.reason === "TAKE_PROFIT" || t.reason === "LOCK_GREEN") {
-                  notifyTakeProfit(t.pair, t.pnl);
-                }
-              }
-            } finally {
-              exitingPairs.delete(ex.pair);
-            }
-          }
+          const closedPending = pf.pendingExits(
+            prices,
+            settings,
+            bids,
+            gridAddsMap(get().gridState),
+          );
+          await executePendingExits(get, set, pf, closedPending, settings, live);
 
           pf.markToMarket(prices);
           const assets = await syncLiveAssets(get, set, prices, pf);
@@ -1882,6 +1914,12 @@ export const useBotStore = create<BotState>()(
           );
 
           const regime = detectRegime(opps);
+          let playbookWhy = "Smart agresif";
+          const pb = playbookOf("smart");
+          if (settings.playbook !== "smart") {
+            settings = { ...settings, playbook: "smart" };
+          }
+          playbookWhy = `Smart agresif · ${regime.regime} — ${regime.reason}`;
           const autoTrade = get().autoTrade;
           const universe = opps.slice(0, 12);
           const byPair = Object.fromEntries(opps.map((o) => [o.pair, o]));
@@ -1899,63 +1937,42 @@ export const useBotStore = create<BotState>()(
 
           let aiSource: BotState["aiSource"] = "heuristic";
           let aiSummary = "";
-          let aiDecisions: AiDecision[] = [];
-          let skipNewBuys = false;
-          const grokKey = String(settings.xaiApiKey ?? "").trim();
-          const gemKey = String(settings.geminiApiKey ?? "").trim();
-          const wantCloud = grokKey.length > 12 || gemKey.length > 10;
-          if (autoTrade && get().running && (universe.length || held.length) && wantCloud) {
-            const ai = await askAi({
-              regime: regime.regime,
-              allowEntry: regime.allowEntry,
-              candidates: universe,
-              weights: `${weights.range.toFixed(2)}`,
-              openPositions: pf.openCount(),
-              maxPositions: settings.maxPositions,
-              minScore: settings.minScoreToBuy,
-              feeRate: settings.feeRate,
-              xaiApiKey: settings.xaiApiKey,
-              geminiApiKey: settings.geminiApiKey,
-              held,
-              cash: pf.cash,
-              equity: summary.equity,
-              dailyLoss: pf.dailyLoss(),
-              maxNotional: settings.maxNotional,
-              live,
-            });
-            aiSource = ai.source === "gemini" || ai.source === "grok" ? ai.source : "heuristic";
-            if ((ai as { source?: string }).source === "error") {
-              aiSource = "heuristic";
-              skipNewBuys = live;
-              get().pushLog(
-                `Grok/AI gagal — tidak BUY live (exit tetap jalan): ${ai.summary}`,
-                "error",
-              );
-            }
-            aiSummary = ai.summary;
-            aiDecisions = ai.decisions;
-            get().pushLog(
-              aiSource === "grok"
-                ? `GROK PILOT · ${aiSummary}`
-                : `AI ${aiSource}: ${aiSummary}`,
-              "ai",
-            );
-          } else if (universe.length) {
+          const aiDecisions: AiDecision[] = [];
+          const skipNewBuys = false;
+          if (universe.length) {
             aiSummary = regime.allowEntry
-              ? `Hybrid ${regime.regime} — ${regime.reason}`
+              ? `Heuristic ${pb.name} · ${regime.regime} — ${regime.reason}`
               : `NO TRADE · ${regime.reason}`;
           }
 
-          const grokPilot = aiSource === "grok";
-          const globalRet = summary.returnPct;
-          const hitLoss = globalRet <= -((settings.globalStopPct || 0.05) * 100);
-          const hitWin = globalRet >= (settings.globalTakePct || 0.05) * 100;
-          const canHeuristic = !grokPilot && regime.allowEntry && !hitWin;
+          const grokPilot = false;
+          const eqNow = summary.equity > 0 ? summary.equity : pf.cash;
+          let base = get().circuitBase;
+          if (!(base >= 10_000)) base = settings.initialIdr >= 10_000 ? settings.initialIdr : eqNow;
+          if (pf.openCount() === 0 && eqNow >= 10_000) {
+            if (Math.abs(eqNow - base) / Math.max(base, 1) >= 0.049) {
+              get().pushLog(
+                `Circuit reset — modal acuan Rp ${Math.round(eqNow).toLocaleString("id-ID")} (posisi flat)`,
+                "ai",
+              );
+            }
+            base = eqNow;
+            set({ circuitBase: eqNow });
+          }
+          const globalRet = base > 0 ? ((eqNow - base) / base) * 100 : 0;
+          const hitLoss =
+            pf.openCount() > 0 &&
+            globalRet <= -((settings.globalStopPct || 0.05) * 100);
+          const hitWin =
+            pf.openCount() > 0 &&
+            globalRet >= (settings.globalTakePct || 0.05) * 100;
+          const canHeuristic = !grokPilot && !hitWin;
           const canTrade =
             autoTrade &&
             get().running &&
             (grokPilot || canHeuristic) &&
-            !hitWin;
+            !hitWin &&
+            !hitLoss;
 
           if (hitWin) {
             aiSummary = `LOCK +${((settings.globalTakePct || 0.05) * 100).toFixed(0)}% global — jual yang hijau, stop entry`;
@@ -2012,7 +2029,27 @@ export const useBotStore = create<BotState>()(
             }
           }
 
-          if (pb.id === "grid" && autoTrade && get().running && !hitWin) {
+          const hasGridPos = Object.values(pf.positions).some((p) => p.setup === "GRID");
+          if (!get().gridState && hasGridPos) {
+            const g = Object.values(pf.positions).find((p) => p.setup === "GRID");
+            if (g) {
+              set({
+                gridState: {
+                  pair: g.pair,
+                  anchor: g.entryPrice,
+                  lastBuyPx: g.entryPrice,
+                  adds: 1,
+                },
+              });
+            }
+          }
+          if (
+            hasGridPos &&
+            autoTrade &&
+            get().running &&
+            !hitWin &&
+            !hitLoss
+          ) {
             const why = await runGridCycle(
               get,
               set,
@@ -2028,27 +2065,27 @@ export const useBotStore = create<BotState>()(
             const step = gridStepPct(settings.feeRate, settings.takeProfit);
             aiSummary = `GRID ${gs?.pair?.replace("_idr", "").toUpperCase() || "—"} · step ${(step * 100).toFixed(1)}% · lot ${gs?.adds ?? 0} · ${why}`;
             get().pushLog(aiSummary, "ai");
-          } else if (skipNewBuys) {
+          }
+
+          if (skipNewBuys) {
             if (get().running) {
               get().pushLog("NO TRADE — AI gagal, tidak fallback BUY", "error");
             }
           } else if (!canTrade) {
-            if (get().running) {
+            if (get().running && !hitLoss) {
               get().pushLog(`Tidak order: ${aiSummary}`, "ai");
             }
           } else {
-            const scores: Record<string, number> = {};
-            for (const o of opps) scores[o.pair] = o.score;
             const buyRows = grokPilot
               ? aiDecisions
                   .filter((d) => d.action === "BUY")
                   .map((d) => byPair[d.pair])
-                  .filter(Boolean)
+                  .filter((row) => row && row.setup !== "PULLBACK")
               : universe.filter((o) => {
+                  if (o.setup === "PULLBACK") return false;
                   if (!playbookFitsSetup(pb, o.setup, regime.regime)) return false;
                   if (!playbookAllowsPair(pb, o.pair)) return false;
                   if (pb.requireStrong) return o.signal === "STRONG_BUY";
-                  if (o.setup === "BOUNCE") return o.signal === "STRONG_BUY";
                   return o.signal === "BUY" || o.signal === "STRONG_BUY";
                 });
 
@@ -2064,7 +2101,6 @@ export const useBotStore = create<BotState>()(
             for (const row of buyRows) {
               if (!row) continue;
               if (isDropped(row.pair) || sellingNow.has(row.pair)) continue;
-              if (regime.regime === "TREND_DOWN") continue;
               if (!grokPilot) {
                 const ev = evaluateEntry(row, settings.feeRate, {
                   regime: regime.regime,
@@ -2085,6 +2121,13 @@ export const useBotStore = create<BotState>()(
                   continue;
                 }
               }
+              const entryExtras = {
+                stopPct: row.setupStopPct,
+                tpPct: row.setupTpPct,
+                setup: row.setup,
+                holdMin: row.setupHoldMin,
+                setupLow: row.setupDumpLow,
+              };
               let want = grokPilot ? buyPairs.has(row.pair) : false;
               if (!grokPilot) {
                 want = true;
@@ -2093,7 +2136,7 @@ export const useBotStore = create<BotState>()(
 
               if (pf.has(row.pair)) continue;
               if (isPairCooling(row.pair)) {
-                get().pushLog(`Skip ${row.pair}: cooldown 15 menit setelah jual`, "ai");
+                get().pushLog(`Skip ${row.pair}: cooldown 12 menit setelah jual`, "ai");
                 continue;
               }
               if (filled >= 1) {
@@ -2101,64 +2144,51 @@ export const useBotStore = create<BotState>()(
                 break;
               }
               if (pf.openCount() >= maxPos) {
-                if (!grokPilot) {
-                  get().pushLog(
-                    `Posisi penuh (${pf.openCount()}) — hold sampai TP/SL, tidak rotasi`,
-                    "ai",
-                  );
-                  break;
-                }
-                const victim = pickRotateVictim(pf.positions, prices, scores);
-                const dec = aiDecisions.find((d) => d.pair === row.pair);
-                const replace = dec?.replace;
-                const v = replace && pf.has(replace)
-                  ? {
-                      pair: replace,
-                      score: scores[replace] ?? 40,
-                      pnlPct: 0,
-                      ageMin: 9,
-                    }
-                  : victim;
-                if (!v || !shouldRotate(row.score, v)) {
-                  get().pushLog(
-                    `Tidak rotasi ke ${row.pair} — hold posisi (butuh +18 score & 15 menit)`,
-                    "ai",
-                  );
-                  break;
-                }
-                const vPos = pf.positions[v.pair];
-                const vMark = prices[v.pair] ?? vPos.entryPrice;
-                if (live) {
-                  const sold = await liveSellOk(settings, v.pair, vMark * 0.997, vPos.qty);
-                  if (!sold.ok) {
-                    get().pushLog(`Rotasi batal — LIVE SELL ${v.pair} gagal: ${sold.error}`, "error");
-                    break;
-                  }
-                }
-                pf.closePosition(v.pair, vMark, `ROTATE_OUT:${row.pair}`, settings);
-                markPairCooldown(v.pair);
-                get().pushLog(`Rotasi keluar ${v.pair} → ${row.pair}`, "ai");
+                get().pushLog(
+                  `Posisi penuh (${pf.openCount()}) — hold sampai TP/SL, tidak rotasi`,
+                  "ai",
+                );
+                break;
               }
 
               if (live) {
                 try {
-                  const sized = positionSizeIdr(pf.cash || summary.equity, settings, row.pair);
+                  await ensurePairMeta();
+                  const limitPx = row.sell > 0 ? row.sell : row.price;
+                  const need = minBuyIdr(row.pair, limitPx);
+                  const sized = positionSizeIdr(
+                    settings.trade90Pct
+                      ? summary.equity || pf.cash
+                      : pf.cash || summary.equity,
+                    settings,
+                    row.pair,
+                  );
+                  const cashCap = Math.floor(pf.cash * 0.95);
+                  const notionCap = settings.trade90Pct
+                    ? cashCap
+                    : Math.max(settings.maxNotional || 0, need);
                   const size = Math.max(
-                    10_000,
+                    need,
                     Math.min(
-                      sized || settings.maxNotional,
-                      settings.maxNotional,
-                      pf.cash * 0.92,
+                      Math.max(sized || 0, need),
+                      notionCap,
+                      cashCap,
                     ),
                   );
-                  if (size < 10_000 || pf.cash < 10_000) {
+                  if (pf.cash < 10_000) {
                     get().pushLog(
-                      `LIVE BUY skip ${row.pair}: cash Rp ${Math.round(pf.cash).toLocaleString("id-ID")} < min 10rb`,
+                      `LIVE BUY skip: cash Rp ${Math.round(pf.cash).toLocaleString("id-ID")} < min 10rb`,
                       "error",
                     );
                     break;
                   }
-                  const limitPx = row.sell > 0 ? row.sell : row.price;
+                  if (size < need || cashCap < need) {
+                    get().pushLog(
+                      `LIVE BUY skip ${row.pair}: lot min Rp ${need.toLocaleString("id-ID")} > cash`,
+                      "ai",
+                    );
+                    continue;
+                  }
                   const before = await getCoinBalances(
                     settings.apiKey,
                     settings.apiSecret,
@@ -2193,10 +2223,14 @@ export const useBotStore = create<BotState>()(
                         settings.apiSecret,
                         coinOfPair(row.pair),
                       );
-                      const partial = quantizeBaseQty(
-                        Math.max(0, afterCancel.avail - (before.ok ? before.avail : 0)),
-                        row.pair,
-                      );
+                      const partial = fillQtyFromDelta(before, afterCancel, row.pair);
+                      if (partial < 0) {
+                        get().pushLog(
+                          `LIVE BUY ${row.pair} balance gagal — batal`,
+                          "error",
+                        );
+                        continue;
+                      }
                       if (partial > 0) {
                         const infoP = await getInfo(settings.apiKey, settings.apiSecret);
                         pf.syncCash(infoP.balanceIdr);
@@ -2210,11 +2244,9 @@ export const useBotStore = create<BotState>()(
                             ? `GROK:${decP?.reason || row.score}`
                             : `${row.setup}:${aiSource}:${row.score}`,
                           {
-                            stopPct: decP?.slPct ?? row.setupStopPct,
-                            tpPct: decP?.tpPct ?? row.setupTpPct,
-                            setup: row.setup,
-                            holdMin: row.setupHoldMin,
-                            setupLow: row.setupDumpLow,
+                            ...entryExtras,
+                            stopPct: decP?.slPct ?? entryExtras.stopPct,
+                            tpPct: decP?.tpPct ?? entryExtras.tpPct,
                             skipCash: true,
                           },
                         );
@@ -2239,10 +2271,14 @@ export const useBotStore = create<BotState>()(
                     settings.apiSecret,
                     coinOfPair(row.pair),
                   );
-                  const filledQty = quantizeBaseQty(
-                    Math.max(0, after.avail - (before.ok ? before.avail : 0)),
-                    row.pair,
-                  );
+                  const filledQty = fillQtyFromDelta(before, after, row.pair);
+                  if (filledQty < 0) {
+                    get().pushLog(
+                      `LIVE BUY ${row.pair} balance gagal — tidak catat posisi`,
+                      "error",
+                    );
+                    continue;
+                  }
                   if (filledQty <= 0) {
                     get().pushLog(
                       `LIVE BUY ${row.pair} submitted tapi qty 0 — tidak catat posisi`,
@@ -2267,16 +2303,15 @@ export const useBotStore = create<BotState>()(
                       ? `GROK:${dec?.reason || row.score}`
                       : `${row.setup}:${aiSource}:${row.score}`,
                     {
-                      stopPct: dec?.slPct ?? row.setupStopPct,
-                      tpPct: dec?.tpPct ?? row.setupTpPct,
-                      setup: row.setup,
-                      holdMin: row.setupHoldMin,
-                      setupLow: row.setupDumpLow,
+                      ...entryExtras,
+                      stopPct: dec?.slPct ?? entryExtras.stopPct,
+                      tpPct: dec?.tpPct ?? entryExtras.tpPct,
                       skipCash: true,
                     },
                   );
                   if (trade) {
                     filled += 1;
+                    followChart(set, get, trade.pair);
                     get().pushLog(
                       `LIVE BUY FILLED ${trade.pair} qty=${trade.qty} @ ${Math.round(trade.price).toLocaleString("id-ID")}`,
                       "entry",
@@ -2301,15 +2336,14 @@ export const useBotStore = create<BotState>()(
                   : `${row.setup}:${aiSource}:${row.score}`,
                 settings,
                 {
-                  stopPct: dec?.slPct ?? row.setupStopPct,
-                  tpPct: dec?.tpPct ?? row.setupTpPct,
-                  setup: row.setup,
-                  holdMin: row.setupHoldMin,
-                  setupLow: row.setupDumpLow,
+                  ...entryExtras,
+                  stopPct: dec?.slPct ?? entryExtras.stopPct,
+                  tpPct: dec?.tpPct ?? entryExtras.tpPct,
                 },
               );
               if (trade) {
                 filled += 1;
+                followChart(set, get, trade.pair);
                 get().pushLog(
                   `AUTO BUY ${trade.pair} qty=${trade.qty} @ ${Math.round(trade.price).toLocaleString("id-ID")}`,
                   "entry",
@@ -2334,26 +2368,26 @@ export const useBotStore = create<BotState>()(
             }
           }
 
-          if (live && get().running && autoTrade && pb.id !== "grid") {
+          if (live && get().running && autoTrade) {
             try {
               const heldPairs = new Set(Object.keys(pf.positions));
-              const bought = new Set(
-                pf.trades.filter((t) => t.side === "BUY").map((t) => t.pair),
-              );
               const { raw } = await getInfo(settings.apiKey, settings.apiSecret);
               const w = parseWallet(raw, prices);
               for (const asset of w) {
                 if (asset.coin === "idr" || asset.qty <= 0) continue;
                 const pair = `${asset.coin}_idr`;
                 if (heldPairs.has(pair)) continue;
-                if (!bought.has(pair)) continue;
+                if (!isDropped(pair)) continue;
                 if (asset.hold > 0) continue;
                 if (asset.valueIdr > 0 && asset.valueIdr < 10_000) continue;
-                get().pushLog(`Wallet sisa ${asset.coin.toUpperCase()} — jual (tidak hold)`, "live");
+                get().pushLog(
+                  `Sisa ${asset.coin.toUpperCase()} setelah exit — jual leftover`,
+                  "live",
+                );
                 await get().sellWalletCoin(asset.coin);
               }
             } catch {
-              /* sweep best-effort */
+              /* leftover after our own exit only */
             }
           }
 
@@ -2380,6 +2414,7 @@ export const useBotStore = create<BotState>()(
             aiSummary,
             aiDecisions,
             equityTier,
+            playbookWhy,
             error: null,
           });
         } catch (e) {
@@ -2413,6 +2448,8 @@ export const useBotStore = create<BotState>()(
         watchPair: s.watchPair || "btc_idr",
         watchTf: s.watchTf || "15",
         gridState: s.gridState ?? null,
+        autoPlaybook: s.autoPlaybook !== false,
+        circuitBase: s.circuitBase || 0,
       }),
       merge: (persisted, current) => {
         const p = (persisted ?? {}) as Partial<BotState>;
@@ -2457,6 +2494,9 @@ export const useBotStore = create<BotState>()(
           watchPair: p.watchPair || "btc_idr",
           watchTf: p.watchTf || "15",
           gridState: p.gridState ?? null,
+          autoPlaybook: p.autoPlaybook !== false,
+          playbookWhy: p.playbookWhy ?? "",
+          circuitBase: typeof p.circuitBase === "number" ? p.circuitBase : 0,
         };
       },
     },

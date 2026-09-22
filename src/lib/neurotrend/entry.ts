@@ -23,14 +23,14 @@ export type EntryPolicy = {
 
 const SMART: EntryPolicy = {
   pair: "*",
-  minScore: 58,
-  maxSpreadPct: 0.75,
+  minScore: 56,
+  maxSpreadPct: 0.7,
   minRangePos: 0.05,
-  maxRangePos: 0.95,
-  minDayRangePct: 0.5,
-  stopLoss: 0.016,
-  takeProfit: 0.014,
-  label: "HYBRID",
+  maxRangePos: 0.97,
+  minDayRangePct: 0.3,
+  stopLoss: 0.018,
+  takeProfit: 0.02,
+  label: "SMART",
 };
 
 export const ENTRY_POLICIES: Record<string, EntryPolicy> = {};
@@ -95,9 +95,19 @@ export function evaluateEntry(
   });
   const pb = playbookOf(opts?.playbook);
 
-  const kindOk =
-    o.setup === "BOUNCE" || o.setup === "PULLBACK" || o.setup === "BREAKOUT";
+  if (o.setup === "PULLBACK") {
+    return {
+      ok: false,
+      reason: "PULLBACK dimatikan — sering kena SL",
+      policy: p,
+    };
+  }
+
+  const kindOk = o.setup === "BOUNCE" || o.setup === "BREAKOUT";
   if (opts?.skipKind) {
+    if (!kindOk) {
+      return { ok: false, reason: "Grok: hanya BOUNCE/BREAKOUT", policy: p };
+    }
     if (o.spreadPct > pb.maxSpreadPct + 0.25) {
       return { ok: false, reason: `spread ${o.spreadPct.toFixed(2)}%`, policy: p };
     }
@@ -127,15 +137,13 @@ export function evaluateEntry(
     };
   }
 
-  const minScore = Math.max(
-    pb.minScore,
-    o.setup === "BREAKOUT" ? 68 : o.setup === "BOUNCE" ? 64 : 62,
-  );
+  if (/^(btc|eth)_idr$/.test(o.pair.toLowerCase())) {
+    return { ok: false, reason: "skip BTC/ETH", policy: p };
+  }
+
+  const minScore = Math.max(pb.minScore, 56);
   if (o.score < minScore) {
     return { ok: false, reason: `setup lemah ${o.score} < ${minScore}`, policy: p };
-  }
-  if (pb.requireStrong && o.signal !== "STRONG_BUY") {
-    return { ok: false, reason: `${pb.name} hanya STRONG_BUY`, policy: p };
   }
   if (o.signal !== "BUY" && o.signal !== "STRONG_BUY") {
     return { ok: false, reason: `signal ${o.signal}`, policy: p };
@@ -162,7 +170,7 @@ export function evaluateEntry(
       policy: p,
     };
   }
-  if ((o.volumeIdr ?? 0) < 300_000_000) {
+  if ((o.volumeIdr ?? 0) < 80_000_000) {
     return { ok: false, reason: "buku tipis", policy: p };
   }
 

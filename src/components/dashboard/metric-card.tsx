@@ -11,7 +11,6 @@ export function MetricCard({
   value: string;
   hint?: string;
   tone?: "default" | "up" | "down";
-  /** Soft pulse — value updates from live quotes */
   live?: boolean;
 }) {
   return (

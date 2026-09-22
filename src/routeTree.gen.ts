@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as ApiEngineRouteImport } from './routes/api/engine'
+import { Route as ApiAiChatRouteImport } from './routes/api/ai/chat'
 import { Route as ApiAiDecideRouteImport } from './routes/api/ai/decide'
 import { Route as ApiAuthSplatRouteImport } from './routes/api/auth/$'
 import { Route as ApiIndodaxOhlcRouteImport } from './routes/api/indodax/ohlc'
@@ -32,6 +33,11 @@ const LoginRoute = LoginRouteImport.update({
 const ApiEngineRoute = ApiEngineRouteImport.update({
   id: '/api/engine',
   path: '/api/engine',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiAiChatRoute = ApiAiChatRouteImport.update({
+  id: '/api/ai/chat',
+  path: '/api/ai/chat',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ApiAiDecideRoute = ApiAiDecideRouteImport.update({
@@ -69,6 +75,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
   '/api/engine': typeof ApiEngineRoute
+  '/api/ai/chat': typeof ApiAiChatRoute
   '/api/ai/decide': typeof ApiAiDecideRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
   '/api/indodax/ohlc': typeof ApiIndodaxOhlcRoute
@@ -80,6 +87,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
   '/api/engine': typeof ApiEngineRoute
+  '/api/ai/chat': typeof ApiAiChatRoute
   '/api/ai/decide': typeof ApiAiDecideRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
   '/api/indodax/ohlc': typeof ApiIndodaxOhlcRoute
@@ -92,6 +100,7 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
   '/api/engine': typeof ApiEngineRoute
+  '/api/ai/chat': typeof ApiAiChatRoute
   '/api/ai/decide': typeof ApiAiDecideRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
   '/api/indodax/ohlc': typeof ApiIndodaxOhlcRoute
@@ -105,6 +114,7 @@ export interface FileRouteTypes {
     | '/'
     | '/login'
     | '/api/engine'
+    | '/api/ai/chat'
     | '/api/ai/decide'
     | '/api/auth/$'
     | '/api/indodax/ohlc'
@@ -116,6 +126,7 @@ export interface FileRouteTypes {
     | '/'
     | '/login'
     | '/api/engine'
+    | '/api/ai/chat'
     | '/api/ai/decide'
     | '/api/auth/$'
     | '/api/indodax/ohlc'
@@ -127,6 +138,7 @@ export interface FileRouteTypes {
     | '/'
     | '/login'
     | '/api/engine'
+    | '/api/ai/chat'
     | '/api/ai/decide'
     | '/api/auth/$'
     | '/api/indodax/ohlc'
@@ -139,6 +151,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   LoginRoute: typeof LoginRoute
   ApiEngineRoute: typeof ApiEngineRoute
+  ApiAiChatRoute: typeof ApiAiChatRoute
   ApiAiDecideRoute: typeof ApiAiDecideRoute
   ApiAuthSplatRoute: typeof ApiAuthSplatRoute
   ApiIndodaxOhlcRoute: typeof ApiIndodaxOhlcRoute
@@ -168,6 +181,13 @@ declare module '@tanstack/react-router' {
       path: '/api/engine'
       fullPath: '/api/engine'
       preLoaderRoute: typeof ApiEngineRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/ai/chat': {
+      id: '/api/ai/chat'
+      path: '/api/ai/chat'
+      fullPath: '/api/ai/chat'
+      preLoaderRoute: typeof ApiAiChatRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/ai/decide': {
@@ -219,6 +239,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   LoginRoute: LoginRoute,
   ApiEngineRoute: ApiEngineRoute,
+  ApiAiChatRoute: ApiAiChatRoute,
   ApiAiDecideRoute: ApiAiDecideRoute,
   ApiAuthSplatRoute: ApiAuthSplatRoute,
   ApiIndodaxOhlcRoute: ApiIndodaxOhlcRoute,

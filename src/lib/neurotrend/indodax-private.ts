@@ -267,14 +267,84 @@ export function fmtQty(qty: number, pair?: string, price?: number): string {
   return f.toFixed(d).replace(/\.?0+$/, "") || "0";
 }
 
+/** Round qty UP so min IDR / min lot tidak pecah setelah quantize. */
+export function fmtQtyUp(qty: number, pair?: string, price?: number): string {
+  if (!Number.isFinite(qty) || qty <= 0) return "0";
+  const d = qtyDecimals(pair, price);
+  if (d <= 0) {
+    const whole = Math.ceil(qty - 1e-12);
+    return whole > 0 ? String(whole) : "0";
+  }
+  const tick = 10 ** d;
+  const f = Math.ceil(qty * tick - 1e-12) / tick;
+  if (f <= 0) return "0";
+  return f.toFixed(d).replace(/\.?0+$/, "") || "0";
+}
+
 function parseQty(s: string): number {
   const n = Number(s);
   return Number.isFinite(n) ? n : 0;
 }
 
-/** Quantize qty for paper + live so portfolio never holds banned decimals. */
 export function quantizeBaseQty(qty: number, pair: string): number {
   return parseQty(fmtQty(qty, pair));
+}
+
+export function quantizeBaseQtyUp(qty: number, pair: string, price?: number): number {
+  return parseQty(fmtQtyUp(qty, pair, price));
+}
+
+/** Minimal IDR biar 1 lot + minBase lolos 10rb setelah ceil. */
+export function minBuyIdr(pair: string, px: number): number {
+  if (!(px > 0)) return 10_000;
+  const limits = getPairLimits(pair);
+  const d = qtyDecimals(pair, px);
+  const lot = d <= 0 ? 1 : limits.minBase > 0 ? limits.minBase : 10 ** -d;
+  const minBase = Math.max(limits.minBase || 0, lot);
+  const fromLot = Math.ceil(minBase * px + 1);
+  return Math.max(10_000, limits.minIdr || 10_000, fromLot);
+}
+
+export function planBuyQty(
+  pair: string,
+  px: number,
+  idrBudget: number,
+): { ok: true; qty: number; qtyStr: string; notional: number } | { ok: false; error: string } {
+  if (!(px > 0) || !(idrBudget > 0)) {
+    return { ok: false, error: "price/idr invalid" };
+  }
+  const limits = getPairLimits(pair);
+  const need = minBuyIdr(pair, px);
+  const spend = Math.max(idrBudget, need);
+  let qty = quantizeBaseQtyUp(spend / px, pair, px);
+  if (limits.minBase > 0 && qty < limits.minBase) {
+    qty = quantizeBaseQtyUp(limits.minBase, pair, px);
+  }
+  let notional = qty * px;
+  const d = qtyDecimals(pair, px);
+  const tick = d <= 0 ? 1 : 10 ** -d;
+  let guard = 0;
+  while (notional < 10_000 && qty > 0 && guard < 8) {
+    qty = quantizeBaseQtyUp(qty + tick, pair, px);
+    notional = qty * px;
+    guard += 1;
+  }
+  const qtyStr = fmtQtyUp(qty, pair, px);
+  qty = parseQty(qtyStr);
+  notional = qty * px;
+  if (!(qty > 0)) {
+    return {
+      ok: false,
+      error: `qty 0 setelah quantize. Naikkan size (min ~ Rp ${need.toLocaleString("id-ID")}).`,
+    };
+  }
+  if (notional < 10_000) {
+    return {
+      ok: false,
+      error: `notional Rp ${Math.round(notional)} < min Rp 10.000 setelah ceil lot.`,
+    };
+  }
+  return { ok: true, qty, qtyStr, notional };
 }
 
 /**
@@ -297,36 +367,20 @@ export async function placeBuy(
 
   const limits = getPairLimits(pair);
   const minIdr = Math.max(10_000, limits.minIdr || 10_000);
-  let spend = Math.max(idr, minIdr);
-  let rawQty = spend / px;
-  if (limits.minBase > 0 && rawQty < limits.minBase) {
-    rawQty = limits.minBase;
-    spend = rawQty * px;
-  }
-  let qtyStr = fmtQty(rawQty, pair, px);
-  let qty = parseQty(qtyStr);
-
-  if (!(qty > 0)) {
-    const need = Math.max(minIdr, Math.ceil(px) , Math.ceil((limits.minBase || 1) * px));
+  const plan = planBuyQty(pair, px, Math.max(idr, minIdr));
+  if (!plan.ok) return { error: plan.error };
+  if (plan.notional > idr * 1.25 && plan.notional > minBuyIdr(pair, px) * 1.02) {
     return {
-      error: `qty 0 — 1 ${base.toUpperCase()} ≈ Rp ${Math.round(px).toLocaleString("id-ID")}. Naikkan nominal (min ~ Rp ${need.toLocaleString("id-ID")}).`,
+      error: `qty ${plan.qtyStr} ≈ Rp ${Math.round(plan.notional)} melebihi budget Rp ${Math.round(idr)}.`,
     };
   }
 
-  const notional = qty * px;
-  if (notional < 10_000) {
-    return {
-      error: `notional Rp ${Math.round(notional)} < min Rp 10.000 (qty ${qtyStr}). Naikkan size.`,
-    };
-  }
-
-  // All param values MUST be clean strings (no floats in JSON → form)
   return callPrivate(apiKey, apiSecret, "trade", {
     pair,
     type: "buy",
     order_type: "limit",
     price: fmtPrice(px, pair),
-    [base]: qtyStr,
+    [base]: plan.qtyStr,
   });
 }
 
@@ -403,17 +457,28 @@ export async function getOrderStatus(
   }
   const ret = (raw.data?.return ?? {}) as Record<string, unknown>;
   const status = String(ret.status ?? "").toLowerCase();
-  let remain = Number(ret.remain ?? 0) || 0;
-  for (const [k, v] of Object.entries(ret)) {
-    if (k.startsWith("remain_")) {
-      const n = Number(v);
-      if (Number.isFinite(n)) remain = n;
-    }
+  const cancelled = status === "cancelled" || status === "canceled";
+  const knownFilled =
+    status === "filled" || status === "done" || status === "closed";
+
+  const coin = baseOf(pair);
+  const remainCoinRaw = ret[`remain_${coin}`];
+  const remainCoin =
+    remainCoinRaw != null && remainCoinRaw !== ""
+      ? Number(remainCoinRaw)
+      : Number.NaN;
+
+  // remain_idr is often 0 on sells while coin remain is still open — never use it.
+  let remain = Number.POSITIVE_INFINITY;
+  if (Number.isFinite(remainCoin)) remain = remainCoin;
+  else if (ret.remain != null && ret.remain !== "") {
+    const n = Number(ret.remain);
+    if (Number.isFinite(n)) remain = n;
   }
-  const knownFilled = status === "filled" || status === "done";
-  const knownClosed =
-    status === "closed" || status === "filled" || status === "done";
-  const filled = knownFilled || (remain <= 0 && knownClosed);
+
+  const filled =
+    !cancelled &&
+    (knownFilled || (Number.isFinite(remainCoin) && remainCoin <= 0));
   return { orderId, filled, remain, status: status || "open" };
 }
 

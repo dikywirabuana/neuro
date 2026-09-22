@@ -16,8 +16,9 @@ export type RegimeReport = {
 export type RegimeOpts = { mode?: "strict" | "whitelist" };
 
 export function setupsForRegime(regime: MarketRegime): AllowedSetup[] {
-  if (regime === "TREND_UP") return ["PULLBACK", "BREAKOUT"];
-  if (regime === "CHOP") return ["BOUNCE"];
+  if (regime === "TREND_UP") return ["BREAKOUT", "BOUNCE"];
+  if (regime === "CHOP") return ["BOUNCE", "BREAKOUT"];
+  if (regime === "TREND_DOWN") return ["BOUNCE"];
   return [];
 }
 
@@ -59,8 +60,8 @@ export function detectRegime(
   const breadth = setups / top.length;
 
   let regime: MarketRegime = "CHOP";
-  if (avgRangePos <= 0.36) regime = "TREND_DOWN";
-  else if (avgRangePos >= 0.58 || (trends >= 3 && avgRangePos >= 0.52)) {
+  if (avgRangePos <= 0.26) regime = "TREND_DOWN";
+  else if (avgRangePos >= 0.62 || (trends >= 4 && avgRangePos >= 0.55)) {
     regime = "TREND_UP";
   } else regime = "CHOP";
 
@@ -68,34 +69,20 @@ export function detectRegime(
   const matching = top.filter((o) =>
     setupFitsRegime(o.setup, regime),
   );
-  const allowEntry = matching.some(
-    (o) => o.signal === "BUY" || o.signal === "STRONG_BUY",
-  );
-
-  if (regime === "TREND_DOWN") {
-    return {
-      regime,
-      allowEntry: false,
-      breadth,
-      avgRangePos,
-      tightness,
-      allowedSetups: [],
-      reason: "TREND_DOWN — diam, jangan lawan arus",
-    };
-  }
+  const allowEntry = matching.some((o) => {
+    if (o.signal !== "BUY" && o.signal !== "STRONG_BUY") return false;
+    return true;
+  });
 
   if (!allowEntry) {
     return {
       regime,
-      allowEntry: false,
+      allowEntry: true,
       breadth,
       avgRangePos,
       tightness,
       allowedSetups,
-      reason:
-        regime === "TREND_UP"
-          ? "Tren naik tapi tidak ada PULLBACK/BREAKOUT berkualitas"
-          : "CHOP tanpa BOUNCE berkualitas — diam",
+      reason: `${regime} · nunggu tape/dip (scan tetap jalan)`,
     };
   }
 

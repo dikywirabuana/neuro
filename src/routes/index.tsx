@@ -7,7 +7,7 @@ import {
   TrendingUp,
   RotateCcw,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { ActivityLog } from "@/components/dashboard/activity-log";
 import { AiPanel } from "@/components/dashboard/ai-panel";
@@ -31,10 +31,11 @@ import {
   onBackgroundTick,
   registerNeuroSw,
 } from "@/lib/neurotrend/background";
-import { isLiveEnabled } from "@/lib/neurotrend/types";
-import { PLAYBOOKS, playbookOf } from "@/lib/neurotrend/playbook";
+import { isLiveEnabled, timeExitHoursOf } from "@/lib/neurotrend/types";
+import { playbookOf } from "@/lib/neurotrend/playbook";
 import { gridLevels, gridStepPct } from "@/lib/neurotrend/grid";
 import { formatIdr, formatPct } from "@/lib/utils";
+
 
 export const Route = createFileRoute("/")({
   component: DashboardPage,
@@ -122,9 +123,20 @@ function DashboardPage() {
     setWatchTf,
     manualSell,
     gridState,
+    autoPlaybook,
+    playbookWhy,
+    setAutoPlaybook,
   } = useBotStore();
 
   const liveOn = isLiveEnabled(settings);
+
+  useEffect(() => {
+    try {
+      sessionStorage.removeItem("nt-chunk-reload");
+    } catch {
+      /* ignore */
+    }
+  }, []);
 
   useEffect(() => {
     ensureLiveQuotes();
@@ -196,8 +208,25 @@ function DashboardPage() {
   ];
 
   const openList = Object.values(positions).sort((a, b) =>
-    a.pair.localeCompare(b.pair),
+    b.entryTime - a.entryTime,
   );
+  const openSig = openList.map((p) => p.pair).join(",");
+  const prevOpenSig = useRef("");
+  useEffect(() => {
+    if (!openSig) {
+      prevOpenSig.current = "";
+      return;
+    }
+    if (openSig === prevOpenSig.current) return;
+    const prev = new Set(prevOpenSig.current.split(",").filter(Boolean));
+    const added = openList.map((p) => p.pair).filter((p) => !prev.has(p));
+    prevOpenSig.current = openSig;
+    const target = added[0] || openList[0]?.pair;
+    if (target) {
+      setWatchPair(target);
+      setChartQ(target);
+    }
+  }, [openSig, setWatchPair]);
 
   return (
     <div className="min-h-dvh bg-[var(--color-bg)] pb-28 text-[var(--color-fg)]">
@@ -224,13 +253,7 @@ function DashboardPage() {
             <Badge tone={source === "live" ? "buy" : "warn"}>
               feed {source}
             </Badge>
-            {aiSource === "grok" || grokStatus === "ok" ? (
-              <Badge tone="buy">GROK PILOT</Badge>
-            ) : aiSource === "gemini" ? (
-              <Badge tone="buy">GEMINI</Badge>
-            ) : (
-              <Badge tone="muted">HEURISTIC</Badge>
-            )}
+            <Badge tone="muted">HEURISTIC</Badge>
             {riskMode === "manual" ? (
               <Badge tone="warn">MANUAL</Badge>
             ) : scaleWithEquity ? (
@@ -316,6 +339,19 @@ function DashboardPage() {
           >
             Auto {autoTrade ? "ON" : "OFF"}
           </Button>
+          <label className="inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-elevated)] px-3 py-2 text-xs font-medium">
+            <input
+              type="checkbox"
+              className="h-3.5 w-3.5 accent-[var(--color-accent)]"
+              checked={Boolean(settings.trade90Pct)}
+              onChange={(e) => {
+                const on = e.target.checked;
+                saveApiSettings({ trade90Pct: on });
+                toast.message(on ? "90% equity ON" : "90% equity OFF");
+              }}
+            />
+            90% equity
+          </label>
           <Button
             type="button"
             variant="secondary"
@@ -323,7 +359,9 @@ function DashboardPage() {
           >
             Manual
           </Button>
-          <Badge tone="buy">{playbookOf(settings.playbook).name}</Badge>
+          <Badge tone="buy">
+            {playbookOf(settings.playbook).name}
+          </Badge>
           <Button
             type="button"
             variant="ghost"
@@ -422,50 +460,20 @@ function DashboardPage() {
         <section className="panel space-y-2 p-3 sm:p-4">
           <div className="flex items-center justify-between gap-2">
             <div className="text-xs font-medium uppercase tracking-wider text-[var(--color-muted)]">
-              Trik trade
+              Mesin trade
             </div>
             <div className="text-[11px] text-[var(--color-subtle)]">
-              {playbookOf(settings.playbook).note}
+              {playbookWhy || "Smart agresif"}
             </div>
           </div>
-          <div className="flex flex-wrap gap-1.5">
-            {PLAYBOOKS.map((p) => {
-              const on = settings.playbook === p.id;
-              return (
-                <button
-                  key={p.id}
-                  type="button"
-                  onClick={() => {
-                    saveApiSettings({ playbook: p.id });
-                    toast.success(`${p.name}: ${p.tagline}`);
-                  }}
-                  className={`rounded-full border px-2.5 py-1 text-xs transition ${
-                    on
-                      ? "border-[var(--color-buy)] bg-[var(--color-buy)]/15 font-semibold"
-                      : "border-[var(--color-border)] text-[var(--color-muted)] hover:border-[var(--color-accent)]/50"
-                  }`}
-                  title={p.tricks.join(" · ")}
-                >
-                  {p.name}
-                </button>
-              );
-            })}
+          <div className="rounded-full border border-[var(--color-buy)] bg-[var(--color-buy)]/15 px-2.5 py-1 text-xs font-semibold inline-block">
+            {playbookOf(settings.playbook).name}
           </div>
           <ul className="grid gap-1 text-[11px] text-[var(--color-muted)] sm:grid-cols-2">
             {playbookOf(settings.playbook).tricks.map((t) => (
               <li key={t}>· {t}</li>
             ))}
           </ul>
-          {settings.playbook === "grid" && gridState?.pair ? (
-            <div className="text-[11px] tabular text-[var(--color-accent)]">
-              Pair {gridState.pair.replace("_idr", "").toUpperCase()} ·{" "}
-              {(gridStepPct(settings.feeRate, settings.takeProfit) * 100).toFixed(1)}% step ·{" "}
-              {gridState.adds} lot · last buy{" "}
-              {gridState.lastBuyPx
-                ? gridState.lastBuyPx.toLocaleString("id-ID")
-                : "—"}
-            </div>
-          ) : null}
         </section>
 
         {openList.length > 0 ? (
@@ -473,10 +481,38 @@ function DashboardPage() {
             <div className="mr-1 text-xs font-medium uppercase tracking-wider text-[var(--color-muted)]">
               Open pair
             </div>
+            <div className="flex flex-wrap items-center gap-2 text-[10px] text-[var(--color-subtle)]">
+              <span>Lock +2% equity → jual semua</span>
+              <span className="text-[var(--color-muted)]">Timeout:</span>
+              {([0, 1, 2, 3] as const).map((h) => (
+                <button
+                  key={h}
+                  type="button"
+                  className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${
+                    timeExitHoursOf(settings) === h
+                      ? "border-[var(--color-accent)] bg-[var(--color-accent-dim)] text-[var(--color-accent)]"
+                      : "border-[var(--color-border)] text-[var(--color-muted)]"
+                  }`}
+                  onClick={() => {
+                    saveApiSettings({ timeExitHours: h });
+                    toast.message(
+                      h === 0
+                        ? "Timeout OFF — hanya TP / SL"
+                        : `Timeout ${h} jam — pair tertua dijual paksa`,
+                    );
+                  }}
+                >
+                  {h === 0 ? "Off" : `${h} jam`}
+                </button>
+              ))}
+            </div>
             {openList.map((pos) => {
               const mark = prices[pos.pair] ?? pos.entryPrice;
               const pct = (mark / pos.entryPrice - 1) * 100;
               const up = pct >= 0;
+              const oldestTs = Math.min(...openList.map((p) => p.entryTime));
+              const hours = timeExitHoursOf(settings);
+              const timed = hours > 0 && pos.entryTime === oldestTs;
               return (
                 <div
                   key={pos.pair}
@@ -511,7 +547,7 @@ function DashboardPage() {
                   <HoldCountdown
                     entryTime={pos.entryTime}
                     compact
-                    holdMin={pos.setupHoldMin ?? 12}
+                    holdMin={timed ? hours * 60 : undefined}
                   />
                   <button
                     type="button"
@@ -566,44 +602,100 @@ function DashboardPage() {
             <div className="text-[11px] text-[var(--color-subtle)] pb-2">
               Ketik ticker, pilih dari daftar. Jangan ketik _idr.
             </div>
+            {openList.length > 0 ? (
+              <div className="flex w-full flex-wrap items-center gap-1 pb-1">
+                <span className="mr-1 text-[10px] uppercase tracking-wider text-[var(--color-muted)]">
+                  Chart pair
+                </span>
+                {openList.map((pos) => {
+                  const on = watchPair === pos.pair;
+                  const markP = prices[pos.pair] ?? pos.entryPrice;
+                  const pct = pos.entryPrice > 0 ? (markP / pos.entryPrice - 1) * 100 : 0;
+                  return (
+                    <button
+                      key={`chart-${pos.pair}`}
+                      type="button"
+                      onClick={() => {
+                        setWatchPair(pos.pair);
+                        setChartQ(pos.pair);
+                      }}
+                      className={`rounded-full border px-2.5 py-1 text-[11px] font-semibold tabular ${
+                        on
+                          ? "border-[var(--color-accent)] bg-[var(--color-accent)]/15 text-white"
+                          : "border-[var(--color-border)] text-[var(--color-muted)] hover:text-white"
+                      }`}
+                    >
+                      {pos.pair.replace("_idr", "").toUpperCase()}{" "}
+                      <span className={pct >= 0 ? "text-[var(--color-buy)]" : "text-[var(--color-sell)]"}>
+                        {formatPct(pct)}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : null}
           </div>
           {(() => {
-            const pair = watchPair || openList[0]?.pair || "btc_idr";
-            const pos = positions[pair];
-            const pend = (pendingManual ?? []).find((p) => p.pair === pair);
-            const mark =
-              prices[pair] || pos?.entryPrice || opportunities.find((o) => o.pair === pair)?.price || 0;
-            const planHere = plan?.pair === pair ? plan : null;
-            const limitPx = pend?.limitPx || planHere?.limit || 0;
-            const slFromPlan =
-              !pos && limitPx > 0 && (planHere?.slPct || pend?.slPct)
-                ? limitPx * (1 - (planHere?.slPct || pend?.slPct || 0))
-                : undefined;
-            const tpFromPlan =
-              !pos && limitPx > 0 && (planHere?.tpPct || pend?.tpPct)
-                ? limitPx * (1 + (planHere?.tpPct || pend?.tpPct || 0))
-                : undefined;
+            const openPairs = openList.map((p) => p.pair);
+            const primary =
+              (watchPair && openPairs.includes(watchPair)
+                ? watchPair
+                : openPairs[0]) ||
+              watchPair ||
+              "btc_idr";
+            const secondary = openPairs.find((p) => p !== primary);
+            const chartPairs = secondary ? [primary, secondary] : [primary];
+
+            const renderOne = (pair: string) => {
+              const pos = positions[pair];
+              const pend = (pendingManual ?? []).find((p) => p.pair === pair);
+              const mark =
+                prices[pair] ||
+                pos?.entryPrice ||
+                opportunities.find((o) => o.pair === pair)?.price ||
+                0;
+              const planHere = plan?.pair === pair ? plan : null;
+              const limitPx = pend?.limitPx || planHere?.limit || 0;
+              const slFromPlan =
+                !pos && limitPx > 0 && (planHere?.slPct || pend?.slPct)
+                  ? limitPx * (1 - (planHere?.slPct || pend?.slPct || 0))
+                  : undefined;
+              const tpFromPlan =
+                !pos && limitPx > 0 && (planHere?.tpPct || pend?.tpPct)
+                  ? limitPx * (1 + (planHere?.tpPct || pend?.tpPct || 0))
+                  : undefined;
+              return (
+                <WatchChart
+                  key={pair}
+                  pair={pair}
+                  mark={mark}
+                  position={pos ?? null}
+                  limitPx={!pos ? limitPx : undefined}
+                  slPx={slFromPlan}
+                  tpPx={tpFromPlan}
+                  tf={watchTf || "15"}
+                  onTf={setWatchTf}
+                  gridLines={
+                    gridState?.pair === pair &&
+                    gridState.anchor > 0
+                      ? gridLevels(
+                          gridState.anchor,
+                          gridStepPct(settings.feeRate, settings.takeProfit),
+                        )
+                      : undefined
+                  }
+                />
+              );
+            };
+
             return (
-              <WatchChart
-                pair={pair}
-                mark={mark}
-                position={pos ?? null}
-                limitPx={!pos ? limitPx : undefined}
-                slPx={slFromPlan}
-                tpPx={tpFromPlan}
-                tf={watchTf || "15"}
-                onTf={setWatchTf}
-                gridLines={
-                  settings.playbook === "grid" &&
-                  gridState?.pair === pair &&
-                  gridState.anchor > 0
-                    ? gridLevels(
-                        gridState.anchor,
-                        gridStepPct(settings.feeRate, settings.takeProfit),
-                      )
-                    : undefined
-                }
-              />
+              <div
+                className={`grid gap-3 ${
+                  chartPairs.length > 1 ? "lg:grid-cols-2" : ""
+                }`}
+              >
+                {chartPairs.map((p) => renderOne(p))}
+              </div>
             );
           })()}
         </section>
@@ -716,6 +808,9 @@ function DashboardPage() {
               onScaleWithEquity={setScaleWithEquity}
               onRiskMode={setRiskMode}
               onRiskStyle={setRiskStyle}
+              autoPlaybook={autoPlaybook}
+              playbookWhy={playbookWhy}
+              onAutoPlaybook={setAutoPlaybook}
             />
           )}
           {tab === "log" && <ActivityLog logs={logs} />}

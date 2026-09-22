@@ -26,12 +26,11 @@ export type OptimalPack = {
   note: string;
 };
 
-/** Satu order: modal kecil boleh 85% (min Indodax 10rb), modal besar 25%. */
+/** Max 35% modal / order — agresif tapi bukan all-in. */
 export function hardCapForCapital(capitalIdr: number): number {
   const c = Math.max(0, Math.round(Number(capitalIdr) || 0));
   if (c < 10_000) return 10_000;
-  if (c < 50_000) return Math.max(10_000, Math.round(c * 0.85));
-  return Math.max(10_000, Math.round(c * 0.25));
+  return Math.max(10_000, Math.round(c * 0.35));
 }
 
 /** Ukuran order mengikuti modal + gaya. */
@@ -42,14 +41,10 @@ export function notionalForCapital(
   const c = Math.max(0, Number(capitalIdr) || 0);
   const hard = hardCapForCapital(c);
   if (c < 10_000) return 10_000;
-  let pct = 0.03;
-  if (style === "safe") pct = 0.02;
-  else if (style === "balanced") pct = 0.04;
-  else if (c < 50_000) pct = 0.85;
-  else if (c < 300_000) pct = 0.18;
-  else if (c < 2_000_000) pct = 0.08;
-  else if (c < 10_000_000) pct = 0.045;
-  else pct = 0.03;
+  let pct = 0.28;
+  if (style === "safe") pct = 0.15;
+  else if (style === "balanced") pct = 0.22;
+  else pct = 0.35;
   return Math.max(10_000, Math.min(hard, Math.round(c * pct)));
 }
 
@@ -73,17 +68,17 @@ export function aggressiveFromCapital(capitalIdr: number): OptimalPack {
     tier,
     style: "aggressive",
     label: "Agresif · ikut modal",
-    riskPerTrade: c < 500_000 ? 0.03 : 0.025,
+    riskPerTrade: 0.02,
     stopLoss: 0.018,
-    takeProfit: 0.014,
-    maxPositions: c < 40_000 ? 1 : c >= 10_000_000 ? 4 : c >= 2_000_000 ? 3 : 2,
-    minScoreToBuy: 64,
-    minVolumeIdr: 300_000_000,
+    takeProfit: 0.022,
+    maxPositions: 2,
+    minScoreToBuy: 56,
+    minVolumeIdr: 80_000_000,
     maxNotional: notionalForCapital(c, "aggressive"),
     scanIntervalSec: 15,
     feeRate: 0.0025,
     dailyLossLimitPct: 0.08,
-    note: "Hybrid: CHOP bounce · TREND pullback/breakout · diam di dump.",
+    note: "Smart agresif: momentum likuid + dip cepat.",
   };
 }
 
@@ -94,9 +89,9 @@ export function safeFromCapital(capitalIdr: number): OptimalPack {
     style: "safe",
     label: "Aman · ikut modal",
     riskPerTrade: 0.01,
-    stopLoss: 0.016,
-    takeProfit: 0.014,
-    maxPositions: c < 40_000 ? 1 : c >= 10_000_000 ? 3 : 2,
+    stopLoss: 0.018,
+    takeProfit: 0.022,
+    maxPositions: 1,
     minScoreToBuy: 70,
     minVolumeIdr: 400_000_000,
     maxNotional: notionalForCapital(c, "safe"),
@@ -113,11 +108,11 @@ export function balancedFromCapital(capitalIdr: number): OptimalPack {
     tier: tierOf(c),
     style: "balanced",
     label: "Seimbang · ikut modal",
-    riskPerTrade: 0.018,
-    stopLoss: 0.016,
-    takeProfit: 0.014,
-    maxPositions: c < 40_000 ? 1 : c >= 2_000_000 ? 4 : 3,
-    minScoreToBuy: 62,
+    riskPerTrade: 0.015,
+    stopLoss: 0.018,
+    takeProfit: 0.022,
+    maxPositions: 2,
+    minScoreToBuy: 66,
     minVolumeIdr: 300_000_000,
     maxNotional: notionalForCapital(c, "balanced"),
     scanIntervalSec: 20,

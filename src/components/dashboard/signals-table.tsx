@@ -42,7 +42,7 @@ export function SignalsTable({
   if (!rows.length) {
     return (
       <div className="panel p-8 text-center text-sm text-[var(--color-muted)]">
-        Menunggu scan. Hybrid: BOUNCE (chop), PULLBACK / BREAKOUT (tren).
+        Menunggu scan. Hybrid: BOUNCE (chop) · BREAKOUT (tren). PULLBACK off.
       </div>
     );
   }
@@ -157,7 +157,7 @@ export function SignalsTable({
         </table>
       </div>
       <div className="border-t border-[var(--color-border)] px-4 py-2 text-xs text-[var(--color-subtle)]">
-        Hybrid terbukti: CHOP = BOUNCE. TREND = PULLBACK / BREAKOUT. Dump = diam.
+        Hybrid: CHOP = BOUNCE. TREND = BREAKOUT. PULLBACK off (sering kena SL). Dump = diam.
         TP harus kalahkan fee Indodax. Bukan scalp tipis.
       </div>
     </div>

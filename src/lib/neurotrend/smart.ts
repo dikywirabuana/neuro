@@ -19,26 +19,32 @@ function clamp(n: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, n));
 }
 
-/** TP minimum: round-trip fee + spread + net edge 0.6%. */
 export function feeAwareTpPct(spreadPct: number, feeRate = 0.0025): number {
   const cost = feeRate * 2 + spreadPct / 100;
-  return clamp(cost + 0.006, 0.012, 0.028);
+  return clamp(cost + 0.01, 0.018, 0.028);
 }
 
 function none(reason: string, last: number, extras?: { high?: number; low?: number }): SmartSetup {
   return {
     kind: "NONE",
-    score: 36,
+    score: 28,
     signal: "HOLD",
     reason,
-    stopPct: 0.016,
-    tpPct: 0.014,
+    stopPct: 0.018,
+    tpPct: 0.02,
     holdMin: 12,
     dumpLow: extras?.low ?? last,
     localPeak: extras?.high ?? last,
   };
 }
 
+const SKIP_MAJOR = /^(btc|eth)_idr$/;
+
+/**
+ * Smart Agresif — longgar supaya tetap masuk:
+ * tape rame + tidak crash, atau dip yang sudah berhenti jatuh.
+ * Tick 15 detik tidak wajib hijau.
+ */
 export function detectSetup(
   closes: number[],
   last: number,
@@ -50,42 +56,101 @@ export function detectSetup(
     rsi?: number | null;
     emaFast?: number | null;
     change24h?: number;
+    pair?: string;
   },
 ): SmartSetup {
   const px = last > 0 ? last : closes[closes.length - 1] ?? 0;
   if (!(px > 0)) return none("harga invalid", 0);
 
-  if (extras.volumeIdr < 400_000_000) {
-    return none("volume tipis, buku tidak cukup", px, extras);
+  if (extras.pair && SKIP_MAJOR.test(extras.pair.toLowerCase())) {
+    return none("skip BTC/ETH", px, extras);
   }
-  if (extras.spreadPct > 0.65) {
-    return none(`spread ${extras.spreadPct.toFixed(2)}% makan fee`, px, extras);
+  if (extras.volumeIdr < 80_000_000) {
+    return none("volume tipis", px, extras);
+  }
+  if (extras.spreadPct > 0.7) {
+    return none(`spread ${extras.spreadPct.toFixed(2)}%`, px, extras);
   }
 
-  const series = closes.length >= 4 ? closes : [...closes, px];
-  const window = series.slice(-24);
+  const series = closes.length >= 3 ? closes : [...closes, px];
+  const prev = series[series.length - 2] ?? px;
   const rsiVal =
-    extras.rsi ?? rsi(series, Math.min(14, Math.max(5, series.length - 1)));
-  const e = extras.emaFast ?? ema(series, Math.min(12, window.length));
-  const prev = window[window.length - 2] ?? px;
-  const rsiUse = series.length >= 20 ? rsiVal : null;
+    series.length >= 15
+      ? (rsi(series, 14) ?? extras.rsi ?? null)
+      : extras.rsi ?? null;
 
-  const bounce = bounceSetup(px, prev, rsiUse, extras);
-  const pull = pullbackSetup(px, prev, rsiUse, e, extras);
-  const brk = breakoutSetup(px, prev, rsiUse, extras);
-
-  const ranked = [bounce, pull, brk]
+  const tape = hotTape(px, prev, rsiVal, series, extras);
+  const dip = dipSnatch(px, prev, rsiVal, extras);
+  const ranked = [tape, dip]
     .filter((s) => s.kind !== "NONE")
     .sort((a, b) => b.score - a.score);
   if (ranked[0]) return ranked[0];
 
-  if (rsiVal != null && rsiVal > 76) {
-    return { ...none("jenuh beli", px, extras), score: 24, signal: "SELL" };
+  if (rsiVal != null && rsiVal > 82) {
+    return { ...none("jenuh beli", px, extras), score: 20, signal: "SELL" };
   }
-  return none("tidak ada setup", px, extras);
+  return none("sepi", px, extras);
 }
 
-function bounceSetup(
+function hotTape(
+  px: number,
+  prev: number,
+  rsiVal: number | null,
+  series: number[],
+  extras: {
+    spreadPct: number;
+    volumeIdr: number;
+    high: number;
+    low: number;
+    change24h?: number;
+  },
+): SmartSetup {
+  const { high, low } = extras;
+  if (!(high > low)) return none("range invalid", px, extras);
+  const chg = extras.change24h ?? 0;
+  if (chg < -16) return none(`dump ${chg.toFixed(1)}%`, px, extras);
+  if (extras.volumeIdr < 120_000_000) return none("tape sepi", px, extras);
+
+  const dayPos = (px - low) / (high - low);
+  if (dayPos < 0.08) return none("masih di lantai", px, extras);
+  if (dayPos > 0.97 && chg > 18) return none("chase puncak", px, extras);
+
+  const falling = px < prev * 0.997;
+  if (falling) return none("masih jatuh", px, extras);
+
+  if (rsiVal != null && rsiVal > 78) return none(`RSI ${rsiVal.toFixed(0)} jenuh`, px, extras);
+  if (rsiVal != null && rsiVal < 28) return none("RSI terlalu lemah untuk tape", px, extras);
+
+  const e8 = series.length >= 8 ? ema(series, 8) : null;
+  const aboveEma = e8 == null || px >= e8 * 0.994;
+
+  const volN = clamp(Math.log10(extras.volumeIdr / 120_000_000) / 2.4, 0, 1);
+  const tight = extras.spreadPct <= 0.35 ? 8 : extras.spreadPct <= 0.5 ? 4 : 0;
+  const lift = px >= prev ? 5 : 0;
+  const emaPts = aboveEma ? 6 : 0;
+  const rsiPts = rsiVal != null && rsiVal >= 40 && rsiVal <= 68 ? 6 : 0;
+  const score = clamp(
+    50 + volN * 28 + tight + lift + emaPts + rsiPts - extras.spreadPct * 8,
+    0,
+    99,
+  );
+
+  if (score < 54) return none("tape lemah", px, extras);
+
+  return {
+    kind: "BREAKOUT",
+    score: Math.round(score),
+    signal: score >= 72 ? "STRONG_BUY" : score >= 56 ? "BUY" : "HOLD",
+    reason: `TAPE ${(extras.volumeIdr / 1e6).toFixed(0)}jt · RSI ${rsiVal?.toFixed(0) ?? "—"}`,
+    stopPct: 0.018,
+    tpPct: feeAwareTpPct(extras.spreadPct),
+    holdMin: 16,
+    dumpLow: low,
+    localPeak: high,
+  };
+}
+
+function dipSnatch(
   px: number,
   prev: number,
   rsiVal: number | null,
@@ -98,137 +163,39 @@ function bounceSetup(
   },
 ): SmartSetup {
   const { high, low } = extras;
-  if (!(high > low) || !(low > 0)) return none("range invalid", px, extras);
-  const dumpPct = ((high - low) / high) * 100;
-  const offLow = ((px - low) / low) * 100;
+  if (!(high > low)) return none("range invalid", px, extras);
+  if (extras.volumeIdr < 100_000_000) return none("dip sepi", px, extras);
+  if (extras.spreadPct > 0.65) return none("spread dip lebar", px, extras);
+
+  const chg = extras.change24h ?? 0;
+  if (chg < -18) return none("knife", px, extras);
+
   const dayPos = (px - low) / (high - low);
-  const recovering = px > prev * 1.0015;
-  const chg = extras.change24h;
+  const notDumping = px >= prev * 0.9985;
+  const rsiDip = rsiVal != null && rsiVal <= 46;
+  const nearLow = dayPos <= 0.42;
 
-  if (extras.volumeIdr < 800_000_000) {
-    return none("bounce butuh volume besar", px, extras);
-  }
-  if (extras.spreadPct > 0.45) return none("spread bounce lebar", px, extras);
-  if (dumpPct < 1.8 || dumpPct > 16) return none("bukan panic yang bisa rebound", px, extras);
-  if (dayPos < 0.06 || dayPos > 0.28) return none("bukan zona rebound", px, extras);
-  if (!recovering) return none("belum ada tick balik", px, extras);
-  if (offLow < 0.15 || offLow > 3.2) return none("bukan bounce dari low", px, extras);
-  if (chg != null && chg < -10) return none(`masih dump 24h ${chg.toFixed(1)}%`, px, extras);
-  if (rsiVal != null && rsiVal > 42) {
-    return none(`RSI ${rsiVal.toFixed(0)} belum oversold`, px, extras);
-  }
+  if (!rsiDip && !nearLow) return none("bukan zona dip", px, extras);
+  if (!notDumping) return none("masih jatuh", px, extras);
 
-  const volN = clamp(Math.log10(extras.volumeIdr / 800_000_000) / 2, 0, 1);
+  const volN = clamp(Math.log10(extras.volumeIdr / 100_000_000) / 2, 0, 1);
+  const rsiEdge = rsiVal != null && rsiVal <= 46 ? (46 - rsiVal) * 0.5 : 0;
   const score = clamp(
-    48 +
-      (0.22 - dayPos) * 50 +
-      volN * 10 +
-      (recovering ? 8 : 0) -
-      extras.spreadPct * 14 -
-      Math.max(0, dumpPct - 8) * 1.2,
+    52 + rsiEdge + volN * 18 + (nearLow ? 6 : 0) + (notDumping ? 4 : 0) - extras.spreadPct * 8,
     0,
     99,
   );
 
-  const slPx = low * 0.993;
-  const sl = clamp((px - slPx) / px, 0.01, 0.022);
-  const tp = Math.max(feeAwareTpPct(extras.spreadPct), 0.014);
+  if (score < 56) return none("dip lemah", px, extras);
 
   return {
     kind: "BOUNCE",
     score: Math.round(score),
-    signal: score >= 72 ? "STRONG_BUY" : score >= 64 ? "BUY" : "HOLD",
-    reason: `BOUNCE pos ${dayPos.toFixed(2)} · dump ${dumpPct.toFixed(1)}% · tick naik`,
-    stopPct: sl,
-    tpPct: tp,
-    holdMin: 16,
-    dumpLow: low,
-    localPeak: high,
-  };
-}
-
-function pullbackSetup(
-  px: number,
-  prev: number,
-  rsiVal: number | null,
-  e: number | null,
-  extras: { spreadPct: number; volumeIdr: number; high: number; low: number },
-): SmartSetup {
-  const { high, low } = extras;
-  if (!(high > low) || !(high > 0)) return none("range invalid", px, extras);
-  const dayPos = (px - low) / (high - low);
-  const pullPct = ((high - px) / high) * 100;
-  const aboveEma = e == null || px >= e * 0.992;
-
-  if (dayPos < 0.36 || dayPos > 0.82) return none("bukan zona pullback", px, extras);
-  if (pullPct < 0.35 || pullPct > 14) return none("bukan pullback", px, extras);
-  if (!aboveEma) return none("di bawah EMA", px, extras);
-  if (rsiVal != null && (rsiVal < 34 || rsiVal > 64)) {
-    return none(`RSI ${rsiVal.toFixed(0)} di luar zona pullback`, px, extras);
-  }
-  if (extras.spreadPct > 0.7) return none("spread pullback lebar", px, extras);
-  if (px < prev * 0.997) return none("pullback masih jatuh", px, extras);
-
-  const volN = clamp(Math.log10(extras.volumeIdr / 250_000_000) / 2, 0, 1);
-  const score = clamp(
-    56 +
-      (1.2 - Math.abs(dayPos - 0.55)) * 20 +
-      volN * 12 -
-      extras.spreadPct * 12,
-    0,
-    99,
-  );
-
-  return {
-    kind: "PULLBACK",
-    score: Math.round(score),
-    signal: score >= 74 ? "STRONG_BUY" : score >= 62 ? "BUY" : "HOLD",
-    reason: `PULLBACK −${pullPct.toFixed(1)}% dari high · pos ${dayPos.toFixed(2)}`,
-    stopPct: 0.016,
-    tpPct: Math.max(feeAwareTpPct(extras.spreadPct), 0.013),
-    holdMin: 16,
-    dumpLow: low,
-    localPeak: high,
-  };
-}
-
-function breakoutSetup(
-  px: number,
-  prev: number,
-  rsiVal: number | null,
-  extras: { spreadPct: number; volumeIdr: number; high: number; low: number },
-): SmartSetup {
-  if (extras.volumeIdr < 300_000_000) return none("breakout butuh volume", px, extras);
-  if (extras.spreadPct > 0.6) return none("spread breakout lebar", px, extras);
-  const { high, low } = extras;
-  if (!(high > 0)) return none("high invalid", px, extras);
-  const dayPos = high > low ? (px - low) / (high - low) : 0.5;
-  const above = px >= high * 0.994;
-  const notExtended = px <= high * 1.015;
-  const lifting = px >= prev * 0.999;
-
-  if (dayPos < 0.84 || !above || !notExtended) return none("bukan breakout", px, extras);
-  if (!lifting) return none("breakout lemah", px, extras);
-  if (rsiVal != null && (rsiVal < 50 || rsiVal > 74)) {
-    return none(`RSI ${rsiVal.toFixed(0)} bukan zona breakout`, px, extras);
-  }
-
-  const volN = clamp(Math.log10(extras.volumeIdr / 400_000_000) / 2, 0, 1);
-  const score = clamp(
-    60 + volN * 16 - extras.spreadPct * 14 + (rsiVal != null && rsiVal < 66 ? 6 : 0),
-    0,
-    99,
-  );
-
-  const sl = clamp((px - high * 0.982) / px, 0.012, 0.022);
-  return {
-    kind: "BREAKOUT",
-    score: Math.round(score),
-    signal: score >= 76 ? "STRONG_BUY" : score >= 66 ? "BUY" : "HOLD",
-    reason: `BREAKOUT near high · pos ${dayPos.toFixed(2)} · RSI ${rsiVal?.toFixed(0) ?? "—"}`,
-    stopPct: sl,
-    tpPct: Math.max(feeAwareTpPct(extras.spreadPct), 0.015),
-    holdMin: 18,
+    signal: score >= 72 ? "STRONG_BUY" : score >= 56 ? "BUY" : "HOLD",
+    reason: `DIP RSI ${rsiVal?.toFixed(0) ?? "—"} · pos ${dayPos.toFixed(2)}`,
+    stopPct: clamp((px - low * 0.992) / px, 0.014, 0.026),
+    tpPct: feeAwareTpPct(extras.spreadPct),
+    holdMin: 14,
     dumpLow: low,
     localPeak: high,
   };
